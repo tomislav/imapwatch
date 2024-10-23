@@ -1,4 +1,4 @@
-#/usr/bin/env python3
+# /usr/bin/env python3
 import datetime
 import imaplib
 import socket
@@ -12,9 +12,29 @@ from email.header import decode_header
 from urllib.parse import quote_plus
 from .sender import Sender, SenderThread
 
+
 class Checker:
-    def __init__(self, logger, stop_event, server_address: str, username, password, mailbox, check_for, action, sender, use_ssl=True, timeout=10):
-        self.server, self.ssl_context, = None, None
+    def __init__(
+        self,
+        logger,
+        stop_event,
+        server_address: str,
+        username,
+        password,
+        mailbox,
+        check_for,
+        action,
+        sender,
+        use_ssl=True,
+        timeout=10,
+    ):
+        (
+            self.server,
+            self.ssl_context,
+        ) = (
+            None,
+            None,
+        )
         self.logger = logger
         self.stop_event = stop_event
         self.server_address = server_address
@@ -30,27 +50,36 @@ class Checker:
         self.last_sync = datetime.datetime.now()
 
     def connect(self):
-        self.server = imapclient.IMAPClient(self.server_address, ssl_context=self.ssl_context, use_uid=False)
+        self.server = imapclient.IMAPClient(
+            self.server_address, ssl_context=self.ssl_context, use_uid=False
+        )
         self.server.login(self.username, self.password)
         self.server.select_folder(self.mailbox)
         self.logger.info(f"Connected to mailbox {self.mailbox}")
 
     def timestamps_difference(self, timestamp):
         delta = timestamp - self.last_sync
-        return delta.days * 24*60 + (delta.seconds + delta.microseconds / 10e6) / 60
+        return delta.days * 24 * 60 + (delta.seconds + delta.microseconds / 10e6) / 60
 
     def check_messages(self, responses):
         messages = []
-        if 'flagged' in self.check_for:
-            messages += [ r[0] for r in responses if len(r) > 2 and b'FLAGS' in r[2] and len(r[2]) > 1 and b'\\Flagged' in r[2][1] ]
-        if 'new' in self.check_for:
-            messages += [ r[0] for r in responses if len(r) > 1 and b'EXISTS' in r[1] ]
-        return messages 
+        if "flagged" in self.check_for:
+            messages += [
+                r[0]
+                for r in responses
+                if len(r) > 2
+                and b"FLAGS" in r[2]
+                and len(r[2]) > 1
+                and b"\\Flagged" in r[2][1]
+            ]
+        if "new" in self.check_for:
+            messages += [r[0] for r in responses if len(r) > 1 and b"EXISTS" in r[1]]
+        return messages
 
     def decode_header(self, header):
         h = email.header.decode_header(header.decode())
-        #self.logger.debug(f"h: {h}")
-        #elements = [ i[0].decode(i[1]) if i[1] else i[0] for i in h ]
+        # self.logger.debug(f"h: {h}")
+        # elements = [ i[0].decode(i[1]) if i[1] else i[0] for i in h ]
         elements = []
         for i in h:
             if i[1]:
@@ -61,40 +90,55 @@ class Checker:
                 except AttributeError:
                     elements.append(i[0])
         # TODO should we join with a space or no space?
-        return ''.join(elements)
+        return "".join(elements)
 
     def fetch_messages(self, messages):
         items = []
-        for fetch_id, data in self.server.fetch(messages, ['ENVELOPE']).items():
-            envelope = data[b'ENVELOPE']
+        for fetch_id, data in self.server.fetch(messages, ["ENVELOPE"]).items():
+            envelope = data[b"ENVELOPE"]
             message_id = envelope.message_id.decode()
             subject = self.decode_header(envelope.subject).strip()
             if envelope.from_[0].name:
                 from_ = self.decode_header(envelope.from_[0].name).strip()
             else:
-                from_ = (envelope.from_[0].mailbox + b'@' +  envelope.from_[0].host).decode()
-            items.append({ 
-                'from_': from_,
-                'subject': subject,
-                'message_id': message_id
-            })
-            self.logger.info(f'Flagged item: {from_} / {subject}')
+                from_ = (
+                    envelope.from_[0].mailbox + b"@" + envelope.from_[0].host
+                ).decode()
+            items.append({"from_": from_, "subject": subject, "message_id": message_id})
+            self.logger.info(f"Flagged item: {from_} / {subject}")
 
         return items
 
     def dispatch(self, items):
-        if self.action['action'] == 'things':
-            subject = items[0]['subject']
+        if self.action["action"] == "things":
+            subject = items[0]["subject"]
             items.reverse()
-            body = '\n\n'.join([ f'\u2709\ufe0f {i["from_"]}: "{i["subject"]}"\nmessage:{quote_plus(i["message_id"])}' for i in items ])
-       
+            body = "\n\n".join(
+                [
+                    f'\u2709\ufe0f {i["from_"]}: "{i["subject"]}"\nmessage:{quote_plus(i["message_id"])}'
+                    for i in items
+                ]
+            )
+
+        elif self.action["action"] == "omnifocus":
+            subject = items[0]["subject"]
+            items.reverse()
+            body = "\n\n".join(
+                [
+                    f'\u2709\ufe0f {i["from_"]}: "{i["subject"]}"\nmessage:{quote_plus(i["message_id"])}'
+                    for i in items
+                ]
+            )
+
         # TODO: create this action
-        elif self.action['action'] == 'resend':
+        elif self.action["action"] == "resend":
             body = "Test resend"
-            subject = items[0]['subject']
-        
-        SenderThread('Sender', self.logger, self.sender, self.action['email'], subject, body).start()
-    
+            subject = items[0]["subject"]
+
+        SenderThread(
+            "Sender", self.logger, self.sender, self.action["email"], subject, body
+        ).start()
+
     def idle_loop(self):
         self.server.idle()
         while not self.stop_event.is_set():
@@ -119,31 +163,50 @@ class Checker:
                         # if we restart idle() we can also restart the timer (we need to only
                         # check for non-activity, so we're good now for another {timeout} minutes
                         self.last_sync = current_sync
-                if self.timestamps_difference(current_sync) > self.timeout:  # renew idle command every 10 minutes
+                if (
+                    self.timestamps_difference(current_sync) > self.timeout
+                ):  # renew idle command every 10 minutes
                     self.logger.debug(f"Refresing IDLE timeout")
                     self.server.idle_done()
                     self.server.noop()
                     self.server.idle()
                     self.last_sync = current_sync
-            except (imapclient.exceptions.IMAPClientError, imapclient.exceptions.IMAPClientAbortError,
-                    imaplib.IMAP4.error, imaplib.IMAP4.abort, socket.error, socket.timeout, ssl.SSLError,
-                    ssl.SSLEOFError) as exception:
-                self.logger.critical(f"Checker: Got exception @ {self.mailbox}: {exception}")
+            except (
+                imapclient.exceptions.IMAPClientError,
+                imapclient.exceptions.IMAPClientAbortError,
+                imaplib.IMAP4.error,
+                imaplib.IMAP4.abort,
+                socket.error,
+                socket.timeout,
+                ssl.SSLError,
+                ssl.SSLEOFError,
+            ) as exception:
+                self.logger.critical(
+                    f"Checker: Got exception @ {self.mailbox}: {exception}"
+                )
                 self.logger.info(f"Reconnecting...")
                 self.connect()
                 self.idle_loop()
-        
+
         try:
             self.server.idle_done()
             # TODO how should we close the server connection?
             self.server.logout()
-        except (imapclient.exceptions.IMAPClientError, imapclient.exceptions.IMAPClientAbortError,
-                imaplib.IMAP4.error, imaplib.IMAP4.abort, socket.error, socket.timeout, ssl.SSLError,
-                ssl.SSLEOFError) as exception:
+        except (
+            imapclient.exceptions.IMAPClientError,
+            imapclient.exceptions.IMAPClientAbortError,
+            imaplib.IMAP4.error,
+            imaplib.IMAP4.abort,
+            socket.error,
+            socket.timeout,
+            ssl.SSLError,
+            ssl.SSLEOFError,
+        ) as exception:
             self.logger.info(f"Already disconnected")
- 
+
     def stop(self):
         self.stop_event.set()
+
 
 class CheckerThread(threading.Thread):
     def __init__(self, logger, checker: Checker):
