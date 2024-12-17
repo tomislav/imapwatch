@@ -42,7 +42,8 @@ class IMAPWatch:
             )
 
         configfile = os.path.join(__location__, configfile)
-        self.config = yaml.load(open(configfile, "r"))
+        # Use SafeLoader for secure loading
+        self.config = yaml.load(open(configfile, "r"), Loader=yaml.SafeLoader)
         if not self.config:
             raise SystemExit("No config file found. Exiting.")
 
