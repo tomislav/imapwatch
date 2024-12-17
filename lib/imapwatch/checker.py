@@ -62,19 +62,27 @@ class Checker:
         return delta.days * 24 * 60 + (delta.seconds + delta.microseconds / 10e6) / 60
 
     def check_messages(self, responses):
-        messages = []
-        if "flagged" in self.check_for:
-            messages += [
-                r[0]
-                for r in responses
-                if len(r) > 2
-                and b"FLAGS" in r[2]
-                and len(r[2]) > 1
-                and b"\\Flagged" in r[2][1]
-            ]
-        if "new" in self.check_for:
-            messages += [r[0] for r in responses if len(r) > 1 and b"EXISTS" in r[1]]
-        return messages
+        try:
+            messages = []
+            if "flagged" in self.check_for:
+                messages += [
+                    r[0]
+                    for r in responses
+                    if len(r) > 2
+                    and isinstance(r[2], tuple)
+                    and any(
+                        isinstance(flags, tuple) and b"\\Flagged" in flags
+                        for flags in r[2]
+                        if isinstance(flags, tuple)
+                    )
+                ]
+            if "new" in self.check_for:
+                messages += [r[0] for r in responses if len(r) > 1 and b"EXISTS" in r[1]]
+            return messages
+        except Exception as e:
+            self.logger.error(f"An error occurred: {e}")
+            self.logger.info(f"Responses: {responses}")
+            return []
 
     def decode_header(self, header):
         h = email.header.decode_header(header.decode())
