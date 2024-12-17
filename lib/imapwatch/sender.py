@@ -18,9 +18,9 @@ class Sender:
         self.logger.debug(f"Sending message now: {self.from_} => {to}: {subject}")
         # construct to, from, subject
         msg = MIMEText(message, "plain", "utf-8")
-        msg["From"] = Header(self.from_, "utf-8")
-        msg["To"] = Header(to, "utf-8")
-        msg["Subject"] = Header(subject, "utf-8")
+        msg["From"] = self.from_
+        msg["To"] = to
+        msg["Subject"] = subject
 
         s = smtplib.SMTP(self.server, 587)
         s.ehlo()
