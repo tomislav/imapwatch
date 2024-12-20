@@ -71,7 +71,9 @@ class Checker:
                     if len(r) > 2
                     and isinstance(r[2], tuple)
                     and any(
-                        isinstance(flags, tuple) and b"\\Flagged" in flags
+                        isinstance(flags, tuple)
+                        and b"\\Flagged" in flags
+                        and b"\\Deleted" not in flags  # Exclude if both \\Flagged and \\Deleted are present
                         for flags in r[2]
                         if isinstance(flags, tuple)
                     )
