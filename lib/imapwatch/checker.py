@@ -79,13 +79,23 @@ class Checker:
                     )
                 ]
             if "new" in self.check_for:
-                messages += [r[0] for r in responses if len(r) > 1 and b"EXISTS" in r[1]]
+                messages += [
+                    r[0] 
+                    for r in responses 
+                    if len(r) > 1 
+                    and b"EXISTS" in r[1]
+                ]
+
+            # Ignore responses with b'ENVELOPE'
+            messages = [
+                message for message in messages 
+                if not isinstance(message, dict) or b'ENVELOPE' not in message
+            ]
+
             return messages
         except KeyError as e:
-            if e.args[0] == b'ENVELOPE':  # Ignore specific KeyError
-                self.logger.warning("Ignored KeyError for b'ENVELOPE'")
-            else:
-                self.logger.error(f"Unexpected KeyError: {e}")
+            self.logger.error(f"Unexpected KeyError: {e}")
+            self.logger.info(f"Responses: {responses}")
             return []
         except Exception as e:
             self.logger.error(f"An error occurred: {e}")
