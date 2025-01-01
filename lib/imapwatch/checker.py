@@ -81,6 +81,12 @@ class Checker:
             if "new" in self.check_for:
                 messages += [r[0] for r in responses if len(r) > 1 and b"EXISTS" in r[1]]
             return messages
+        except KeyError as e:
+            if e.args[0] == b'ENVELOPE':  # Ignore specific KeyError
+                self.logger.warning("Ignored KeyError for b'ENVELOPE'")
+            else:
+                self.logger.error(f"Unexpected KeyError: {e}")
+            return []
         except Exception as e:
             self.logger.error(f"An error occurred: {e}")
             self.logger.info(f"Responses: {responses}")
