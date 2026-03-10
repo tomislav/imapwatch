@@ -1,4 +1,4 @@
-#!/usr/local/bin/python3.6
+#!/usr/bin/python3
 # why this hashbang: https://www.linuxquestions.org/questions/programming-9/pidof-x-python-script-not-always-working-4175492559/
 import signal
 import os

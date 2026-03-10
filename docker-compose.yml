@@ -1,0 +1,6 @@
+services:
+  imapwatch:
+    image: ghcr.io/tomislav/imapwatch:latest
+    restart: unless-stopped
+    volumes:
+      - ./imapwatch.yml:/app/imapwatch.yml:ro
