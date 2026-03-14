@@ -84,10 +84,16 @@ if __name__ == "__main__":
             raise SystemExit(f'No running imapwatch process found. Cleaning up stale lockfile')
 
     def status(args):
-        if not pid:
-            print("No running imapwatch process found")
-        else:
+        try:
+            pidfile = TimeoutPIDLockFile(args.pidfile, timeout=1)
+            pid = pidfile.read_pid()
+            if not pid:
+                raise SystemExit("No running imapwatch process found")
+            os.kill(pid, 0)
             print(f"Found running imapwatch process with pid {pid}")
+        except OSError:
+            pidfile.break_lock()
+            raise SystemExit("No running imapwatch process found. Cleaning up stale lockfile")
 
     def restart(args):
         stop(args)

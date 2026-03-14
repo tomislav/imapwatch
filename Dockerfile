@@ -16,6 +16,10 @@ RUN pip install --no-cache-dir lockfile PyYAML python-daemon imapclient boto3
 # Create the required log directory
 RUN mkdir -p /app/log
 
+# Check that the tracked imapwatch process is still alive.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD ["python3", "imapwatch", "--quiet", "status"]
+
 # Default command to run the script
 # CMD ["python3", "imapwatch", "-vDEBUG", "start"]
 CMD ["python3", "imapwatch", "start"]
