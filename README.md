@@ -74,7 +74,7 @@ actions:
     title_generator: 'openai'
 
 openai:
-  model: 'gpt-5.6-luna'
+  model: 'gpt-5.6-terra'
   timeout_seconds: 10
   max_body_chars_per_email: 8000
   max_batch_chars: 24000
@@ -97,7 +97,7 @@ export OPENAI_API_KEY='your-api-key'
 docker compose up -d
 ```
 
-The optional top-level `openai` settings shown above default to model `gpt-5.6-luna`, a 10-second
+The optional top-level `openai` settings shown above default to model `gpt-5.6-terra`, a 10-second
 timeout, 8,000 body characters per email, and 24,000 body characters across the batch. The batch
 budget is divided evenly so every email contributes context. Inline plain text is preferred;
 HTML-only messages are converted to readable text, and attachments are excluded. The request is

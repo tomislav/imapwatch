@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from .logging_utils import log_event
 
 
-DEFAULT_MODEL = "gpt-5.6-luna"
+DEFAULT_MODEL = "gpt-5.6-terra"
 DEFAULT_TIMEOUT_SECONDS = 10
 DEFAULT_MAX_BODY_CHARS_PER_EMAIL = 8000
 DEFAULT_MAX_BATCH_CHARS = 24000

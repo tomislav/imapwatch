@@ -40,7 +40,7 @@ class OpenAITitleGeneratorTests(unittest.TestCase):
         client_class.assert_called_once_with(
             api_key="secret", timeout=4.0, max_retries=0
         )
-        self.assertEqual(generator.model, "gpt-5.6-luna")
+        self.assertEqual(generator.model, "gpt-5.6-terra")
 
     def test_success_returns_structured_title(self):
         generator = self.make_generator(model="test-model")
@@ -167,7 +167,7 @@ class OpenAITitleGeneratorTests(unittest.TestCase):
         self.assertIsNone(title)
         self.logger.warning.assert_called_once_with(
             "event=openai_title_failed account=private-account mailbox=INBOX "
-            "action=things model=gpt-5.6-luna count=1 duration_ms=250 "
+            "action=things model=gpt-5.6-terra count=1 duration_ms=250 "
             "error_type=RuntimeError fallback=original_subject"
         )
         warning = " ".join(str(value) for value in self.logger.warning.call_args.args)

@@ -29,7 +29,7 @@ actions:
     email: 'invoices@accounting.com'
 
 openai:
-  model: 'gpt-5.6-luna'
+  model: 'gpt-5.6-terra'
   timeout_seconds: 10
   max_body_chars_per_email: 8000
   max_batch_chars: 24000

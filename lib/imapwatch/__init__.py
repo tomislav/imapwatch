@@ -175,7 +175,7 @@ class IMAPWatch:
             return None
 
         config = self.config.get("openai", {})
-        model = config.get("model", "gpt-5.6-luna")
+        model = config.get("model", "gpt-5.6-terra")
         timeout_seconds = config.get("timeout_seconds", 10)
         max_body_chars_per_email = config.get("max_body_chars_per_email", 8000)
         max_batch_chars = config.get("max_batch_chars", 24000)
