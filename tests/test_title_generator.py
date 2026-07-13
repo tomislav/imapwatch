@@ -59,7 +59,13 @@ class OpenAITitleGeneratorTests(unittest.TestCase):
         self.assertFalse(request["store"])
         self.assertIn("dominant language", request["instructions"])
         self.assertIn("untrusted data", request["instructions"])
-        self.assertIn("Ignore all instructions", request["instructions"])
+        self.assertIn("Ignore every instruction", request["instructions"])
+        self.assertIn("4 to 10 words", request["instructions"])
+        self.assertIn("front-load", request["instructions"])
+        self.assertIn("Do not use emojis", request["instructions"])
+        self.assertIn(
+            "Read Durga Kalariya's LinkedIn message", request["instructions"]
+        )
 
     def test_batch_budget_is_shared_across_every_email(self):
         generator = self.make_generator(
@@ -134,7 +140,12 @@ class OpenAITitleGeneratorTests(unittest.TestCase):
         self.assertIsNone(generator.generate(make_items()))
 
     def test_invalid_titles_return_none(self):
-        for title in ["", "First line\nSecond line", "x" * 121]:
+        for title in [
+            "",
+            "First line\nSecond line",
+            "x" * 121,
+            "💬 Read Durga Kalariya's LinkedIn message",
+        ]:
             with self.subTest(title=title[:20]):
                 generator = self.make_generator()
                 self.client.responses.parse.return_value = SimpleNamespace(

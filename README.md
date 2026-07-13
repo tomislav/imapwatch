@@ -101,7 +101,8 @@ The optional top-level `openai` settings shown above default to model `gpt-5.6-l
 timeout, 8,000 body characters per email, and 24,000 body characters across the batch. The batch
 budget is divided evenly so every email contributes context. Inline plain text is preferred;
 HTML-only messages are converted to readable text, and attachments are excluded. The request is
-made with response storage disabled.
+made with response storage disabled. Titles target 4–10 words, front-load specific names and
+topics, and never include emojis or decorative prefixes.
 
 Only opted-in Things and OmniFocus actions fetch message bodies or call OpenAI. If the API key is
 missing, the request fails, or the response is not a valid single-line title of at most 120
