@@ -1,6 +1,7 @@
 import logging
 import threading
 import unittest
+from email.message import EmailMessage
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 
@@ -162,6 +163,89 @@ class CheckerPostProcessingTests(unittest.TestCase):
         checker.server.fetch.assert_called_once_with([7], ["ENVELOPE", "UID"])
         self.assertEqual(items[0]["uid"], 1234)
 
+    def test_opted_in_fetch_includes_body_without_marking_message_read(self):
+        checker = make_checker(title_generator=Mock())
+        checker.server = Mock()
+        message = EmailMessage()
+        message.set_content("  Please review\n\nthe attached proposal.  ")
+        envelope = SimpleNamespace(
+            message_id=b"message-id",
+            subject=b"Proposal",
+            from_=[
+                SimpleNamespace(
+                    name=b"Sender", mailbox=b"sender", host=b"example.test"
+                )
+            ],
+        )
+        checker.server.fetch.return_value = {
+            7: {
+                b"ENVELOPE": envelope,
+                b"UID": 1234,
+                b"BODY[]": message.as_bytes(),
+            }
+        }
+
+        items = checker.fetch_messages([7])
+
+        checker.server.fetch.assert_called_once_with(
+            [7], ["ENVELOPE", "UID", "BODY.PEEK[]"]
+        )
+        self.assertEqual(items[0]["body"], "Please review the attached proposal.")
+
+    def test_extract_body_prefers_plain_text_multipart_alternative(self):
+        checker = make_checker(title_generator=Mock())
+        message = EmailMessage()
+        message.set_content("Plain version")
+        message.add_alternative("<p>HTML <b>version</b></p>", subtype="html")
+
+        self.assertEqual(checker.extract_body(message.as_bytes()), "Plain version")
+
+    def test_extract_body_converts_html_and_ignores_script_and_style(self):
+        checker = make_checker(title_generator=Mock())
+        message = EmailMessage()
+        message.set_content(
+            "<style>hidden style</style><p>Hello <b>world</b>.</p>"
+            "<script>hidden script</script>",
+            subtype="html",
+        )
+
+        self.assertEqual(checker.extract_body(message.as_bytes()), "Hello world.")
+
+    def test_extract_body_ignores_text_attachments(self):
+        checker = make_checker(title_generator=Mock())
+        message = EmailMessage()
+        message.set_content("Visible body")
+        message.add_attachment(
+            "Attachment secret", subtype="plain", filename="secret.txt"
+        )
+
+        self.assertEqual(checker.extract_body(message.as_bytes()), "Visible body")
+
+    def test_extract_body_ignores_attached_messages(self):
+        checker = make_checker(title_generator=Mock())
+        attached = EmailMessage()
+        attached["Subject"] = "Attached message"
+        attached.set_content("Attached message secret")
+        message = EmailMessage()
+        message.set_content("Visible body")
+        message.add_attachment(attached, filename="forwarded.eml")
+
+        self.assertEqual(checker.extract_body(message.as_bytes()), "Visible body")
+
+    def test_extract_body_decodes_non_utf8_content(self):
+        checker = make_checker(title_generator=Mock())
+        message = EmailMessage()
+        message.set_content("Živjo, preveri račun", charset="iso-8859-2")
+
+        self.assertEqual(
+            checker.extract_body(message.as_bytes()), "Živjo, preveri račun"
+        )
+
+    def test_extract_body_returns_empty_string_when_body_is_missing(self):
+        checker = make_checker(title_generator=Mock())
+
+        self.assertEqual(checker.extract_body(None), "")
+
     def test_dispatch_passes_all_uids_to_success_callback(self):
         checker = make_checker(remove_flag_after_processing=True)
         checker.post_process = Mock()
@@ -177,6 +261,60 @@ class CheckerPostProcessingTests(unittest.TestCase):
         on_success = sender_thread.call_args.kwargs["on_success"]
         on_success()
         checker.post_process.assert_called_once_with([11, 12])
+
+    def test_dispatch_uses_generated_title_and_preserves_combined_notes(self):
+        generator = Mock()
+        generator.generate.return_value = "Review both proposals"
+        checker = make_checker(title_generator=generator)
+        items = [
+            {
+                "from_": "First",
+                "subject": "One",
+                "message_id": "1",
+                "uid": 11,
+                "body": "First proposal",
+            },
+            {
+                "from_": "Second",
+                "subject": "Two",
+                "message_id": "2",
+                "uid": 12,
+                "body": "Second proposal",
+            },
+        ]
+
+        with patch("lib.imapwatch.checker.SenderThread") as sender_thread:
+            checker.dispatch(items)
+
+        generator.generate.assert_called_once_with(items)
+        call_args = sender_thread.call_args.args
+        self.assertEqual(call_args[4], "Review both proposals")
+        self.assertEqual(
+            call_args[5],
+            '\u2709\ufe0f Second: "Two"\nmessage:2\n\n'
+            '\u2709\ufe0f First: "One"\nmessage:1',
+        )
+        self.assertEqual(items[0]["subject"], "One")
+
+    def test_dispatch_falls_back_to_subject_if_generator_raises(self):
+        generator = Mock()
+        generator.generate.side_effect = RuntimeError("unavailable")
+        checker = make_checker(title_generator=generator)
+        items = [
+            {
+                "from_": "Sender",
+                "subject": "Original subject",
+                "message_id": "1",
+                "uid": 11,
+                "body": "Body",
+            }
+        ]
+
+        with patch("lib.imapwatch.checker.SenderThread") as sender_thread:
+            checker.dispatch(items)
+
+        self.assertEqual(sender_thread.call_args.args[4], "Original subject")
+        checker.logger.warning.assert_called_once()
 
     def test_remove_flag_only(self):
         checker = make_checker(remove_flag_after_processing=True)
@@ -451,6 +589,85 @@ class CheckerConfigurationTests(unittest.TestCase):
 
         self.assertFalse(checker.remove_flag_after_processing)
         self.assertIsNone(checker.archive_after_processing)
+
+    def test_title_generator_is_passed_to_checker(self):
+        mailbox = {"mailbox": "INBOX", "check_for": ["flagged"]}
+        title_generator = Mock()
+
+        checker = self.watch.create_checker(
+            self.account,
+            mailbox,
+            self.action,
+            sender=Mock(),
+            title_generator=title_generator,
+        )
+
+        self.assertIs(checker.title_generator, title_generator)
+
+    def test_missing_api_key_disables_generation_once(self):
+        self.watch.config = {
+            "actions": [
+                {
+                    "action": "things",
+                    "email": "things@example.test",
+                    "title_generator": "openai",
+                }
+            ]
+        }
+
+        with patch.dict("lib.imapwatch.os.environ", {}, clear=True):
+            title_generator = self.watch.create_title_generator()
+
+        self.assertIsNone(title_generator)
+        self.watch.logger.error.assert_called_once()
+
+    def test_openai_config_initializes_shared_generator(self):
+        self.watch.config = {
+            "actions": [
+                {
+                    "action": "omnifocus",
+                    "email": "omnifocus@example.test",
+                    "title_generator": "openai",
+                }
+            ],
+            "openai": {
+                "model": "custom-model",
+                "timeout_seconds": 4,
+                "max_body_chars_per_email": 500,
+                "max_batch_chars": 1000,
+            },
+        }
+
+        with patch.dict(
+            "lib.imapwatch.os.environ", {"OPENAI_API_KEY": "secret"}, clear=True
+        ), patch("lib.imapwatch.OpenAITitleGenerator") as generator_class:
+            title_generator = self.watch.create_title_generator()
+
+        self.assertIs(title_generator, generator_class.return_value)
+        generator_class.assert_called_once_with(
+            self.watch.logger,
+            "secret",
+            model="custom-model",
+            timeout_seconds=4,
+            max_body_chars_per_email=500,
+            max_batch_chars=1000,
+        )
+
+    def test_resend_action_does_not_initialize_title_generation(self):
+        self.watch.config = {
+            "actions": [
+                {
+                    "action": "resend",
+                    "email": "archive@example.test",
+                    "title_generator": "openai",
+                }
+            ]
+        }
+
+        title_generator = self.watch.create_title_generator()
+
+        self.assertIsNone(title_generator)
+        self.watch.logger.error.assert_not_called()
 
 
 class CheckerReconnectTests(unittest.TestCase):

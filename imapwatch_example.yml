@@ -24,8 +24,15 @@ accounts:
 actions:
   - action: 'things'
     email: 'add-to-things-xxxxxxx@things.email'
+    title_generator: 'openai'
   - action: 'resend'
     email: 'invoices@accounting.com'
+
+openai:
+  model: 'gpt-5.6-luna'
+  timeout_seconds: 10
+  max_body_chars_per_email: 8000
+  max_batch_chars: 24000
 
 smtp:
   server: 'smtp.provider.com'

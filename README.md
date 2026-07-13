@@ -71,6 +71,13 @@ accounts:
 actions:
   - action: 'things'
     email: 'add-to-things-xxxxxxx@things.email'
+    title_generator: 'openai'
+
+openai:
+  model: 'gpt-5.6-luna'
+  timeout_seconds: 10
+  max_body_chars_per_email: 8000
+  max_batch_chars: 24000
 
 smtp:
   server: 'smtp.provider.com'
@@ -78,6 +85,28 @@ smtp:
   password: 'mysecretpass'
   from: 'john@provider.com'
 ```
+
+### AI-generated task titles
+
+Things and OmniFocus actions can opt in to action-oriented task titles generated from the sender,
+subject, and readable body text of all emails in a dispatch. Add `title_generator: 'openai'` to an
+action and provide the API key through the environment:
+
+```sh
+export OPENAI_API_KEY='your-api-key'
+docker compose up -d
+```
+
+The optional top-level `openai` settings shown above default to model `gpt-5.6-luna`, a 10-second
+timeout, 8,000 body characters per email, and 24,000 body characters across the batch. The batch
+budget is divided evenly so every email contributes context. Inline plain text is preferred;
+HTML-only messages are converted to readable text, and attachments are excluded. The request is
+made with response storage disabled.
+
+Only opted-in Things and OmniFocus actions fetch message bodies or call OpenAI. If the API key is
+missing, the request fails, or the response is not a valid single-line title of at most 120
+characters, imapwatch logs the failure without email content and creates the task with the original
+first email subject. The existing combined task notes and message links are unchanged.
 
 `smtp.username` and `smtp.password` are optional for SMTP relays that do not require
 authentication. Omit both fields to send without calling SMTP `LOGIN`:

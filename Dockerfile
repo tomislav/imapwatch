@@ -11,7 +11,7 @@ WORKDIR /app
 COPY . /app/
 
 # Install the required Python package
-RUN pip install --no-cache-dir lockfile PyYAML python-daemon imapclient boto3
+RUN pip install --no-cache-dir lockfile PyYAML python-daemon imapclient boto3 openai pydantic
 
 # Create the required log directory
 RUN mkdir -p /app/log

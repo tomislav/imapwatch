@@ -8,5 +8,7 @@ services:
       timeout: 5s
       start_period: 30s
       retries: 3
+    environment:
+      - OPENAI_API_KEY
     volumes:
       - ./imapwatch.yml:/app/imapwatch.yml:ro

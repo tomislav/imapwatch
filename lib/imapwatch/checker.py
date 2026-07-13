@@ -9,8 +9,55 @@ import imapclient
 import imapclient.exceptions
 import email
 from email.header import decode_header
+from email import policy
+from email.parser import BytesParser
+from html.parser import HTMLParser
+import re
 from urllib.parse import quote_plus
-from .sender import Sender, SenderThread
+from .sender import SenderThread
+
+
+class _HTMLTextExtractor(HTMLParser):
+    block_tags = {
+        "br",
+        "div",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "li",
+        "p",
+        "table",
+        "td",
+        "th",
+        "tr",
+    }
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self.hidden_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"script", "style"}:
+            self.hidden_depth += 1
+        elif tag in self.block_tags:
+            self.parts.append(" ")
+
+    def handle_endtag(self, tag):
+        if tag in {"script", "style"} and self.hidden_depth:
+            self.hidden_depth -= 1
+        elif tag in self.block_tags:
+            self.parts.append(" ")
+
+    def handle_data(self, data):
+        if not self.hidden_depth:
+            self.parts.append(data)
+
+    def text(self):
+        return "".join(self.parts)
 
 
 class Checker:
@@ -29,6 +76,7 @@ class Checker:
         timeout=10,
         remove_flag_after_processing=False,
         archive_after_processing=None,
+        title_generator=None,
     ):
         (
             self.server,
@@ -50,6 +98,7 @@ class Checker:
         self.use_ssl = use_ssl
         self.remove_flag_after_processing = remove_flag_after_processing
         self.archive_after_processing = archive_after_processing
+        self.title_generator = title_generator
         self.connected = False
         self.last_activity = 0
         if use_ssl:
@@ -166,7 +215,10 @@ class Checker:
         if not messages:
             return items
 
-        fetch_result = self.server.fetch(messages, ["ENVELOPE", "UID"])
+        fetch_fields = ["ENVELOPE", "UID"]
+        if self.title_generator is not None:
+            fetch_fields.append("BODY.PEEK[]")
+        fetch_result = self.server.fetch(messages, fetch_fields)
         for fetch_id, data in fetch_result.items():
             if b"ENVELOPE" not in data:
                 self.logger.warning(
@@ -197,40 +249,117 @@ class Checker:
             else:
                 from_ = ""
 
-            items.append(
-                {
-                    "from_": from_,
-                    "subject": subject,
-                    "message_id": message_id,
-                    "uid": data.get(b"UID"),
-                }
-            )
+            item = {
+                "from_": from_,
+                "subject": subject,
+                "message_id": message_id,
+                "uid": data.get(b"UID"),
+            }
+            if self.title_generator is not None:
+                item["body"] = self.extract_body(data.get(b"BODY[]"))
+            items.append(item)
             self.logger.info(f"Flagged item: {from_} / {subject}")
 
         return items
 
+    @staticmethod
+    def _normalise_body(value):
+        return re.sub(r"\s+", " ", value).strip()
+
+    @staticmethod
+    def _decode_part(part):
+        try:
+            content = part.get_content()
+            if isinstance(content, str):
+                return content
+        except (LookupError, UnicodeDecodeError):
+            pass
+
+        payload = part.get_payload(decode=True)
+        if payload is None:
+            return ""
+        charset = part.get_content_charset() or "utf-8"
+        try:
+            return payload.decode(charset, errors="replace")
+        except LookupError:
+            return payload.decode("utf-8", errors="replace")
+
+    def extract_body(self, raw_message):
+        if not isinstance(raw_message, bytes):
+            return ""
+        try:
+            message = BytesParser(policy=policy.default).parsebytes(raw_message)
+        except Exception as exception:
+            self.logger.warning(
+                "%s: failed to parse message body (%s)",
+                self.mailbox,
+                type(exception).__name__,
+            )
+            return ""
+
+        plain_parts = []
+        html_parts = []
+
+        def collect_parts(part):
+            # Skip the entire subtree for attached files and attached messages.
+            if part.get_content_disposition() == "attachment" or part.get_filename():
+                return
+            if part.is_multipart():
+                for child in part.iter_parts():
+                    collect_parts(child)
+                return
+
+            content_type = part.get_content_type()
+            if content_type not in {"text/plain", "text/html"}:
+                return
+            content = self._decode_part(part)
+            if content_type == "text/plain":
+                plain_parts.append(content)
+            else:
+                html_parts.append(content)
+
+        collect_parts(message)
+
+        if plain_parts:
+            return self._normalise_body(" ".join(plain_parts))
+        if not html_parts:
+            return ""
+
+        parser = _HTMLTextExtractor()
+        try:
+            parser.feed(" ".join(html_parts))
+            parser.close()
+        except Exception as exception:
+            self.logger.warning(
+                "%s: failed to convert HTML message body (%s)",
+                self.mailbox,
+                type(exception).__name__,
+            )
+            return ""
+        return self._normalise_body(parser.text())
+
     def dispatch(self, items):
         uids = [item["uid"] for item in items if item.get("uid") is not None]
 
-        if self.action["action"] == "things":
+        if self.action["action"] in {"things", "omnifocus"}:
             subject = items[0]["subject"]
-            items.reverse()
             body = "\n\n".join(
                 [
                     f'\u2709\ufe0f {i["from_"]}: "{i["subject"]}"\nmessage:{quote_plus(i["message_id"])}'
-                    for i in items
+                    for i in reversed(items)
                 ]
             )
-
-        elif self.action["action"] == "omnifocus":
-            subject = items[0]["subject"]
-            items.reverse()
-            body = "\n\n".join(
-                [
-                    f'\u2709\ufe0f {i["from_"]}: "{i["subject"]}"\nmessage:{quote_plus(i["message_id"])}'
-                    for i in items
-                ]
-            )
+            if self.title_generator is not None:
+                try:
+                    generated_title = self.title_generator.generate(items)
+                except Exception as exception:
+                    self.logger.warning(
+                        "OpenAI title generation failed (%s); using original email subject",
+                        type(exception).__name__,
+                    )
+                    generated_title = None
+                if generated_title:
+                    subject = generated_title
 
         # TODO: create this action
         elif self.action["action"] == "resend":

@@ -1,4 +1,10 @@
-__all__ = ["checker", "sender", "filelikelogger", "loggingdaemoncontext"]
+__all__ = [
+    "checker",
+    "sender",
+    "title_generator",
+    "filelikelogger",
+    "loggingdaemoncontext",
+]
 
 import time
 import logging
@@ -15,6 +21,7 @@ from lockfile import AlreadyLocked, LockTimeout, NotLocked
 from .sender import Sender
 from .checker import Checker, CheckerThread
 from .loggingdaemoncontext import LoggingDaemonContext
+from .title_generator import OpenAITitleGenerator
 
 
 class IMAPWatch:
@@ -104,7 +111,7 @@ class IMAPWatch:
         except (OSError, ValueError):
             pass
 
-    def create_checker(self, account, mailbox, action, sender):
+    def create_checker(self, account, mailbox, action, sender, title_generator=None):
         return Checker(
             self.logger,
             self.stop_event,
@@ -121,7 +128,50 @@ class IMAPWatch:
                 mailbox.get("remove_flag_after_processing", False)
             ),
             archive_after_processing=mailbox.get("archive_after_processing"),
+            title_generator=title_generator,
         )
+
+    @staticmethod
+    def action_uses_openai_title(action):
+        return (
+            action.get("action") in {"things", "omnifocus"}
+            and action.get("title_generator") == "openai"
+        )
+
+    def create_title_generator(self):
+        if not any(
+            self.action_uses_openai_title(action)
+            for action in self.config.get("actions", [])
+        ):
+            return None
+
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            self.logger.error(
+                "OpenAI title generation is enabled but OPENAI_API_KEY is not set; "
+                "using original email subjects"
+            )
+            return None
+
+        config = self.config.get("openai", {})
+        try:
+            return OpenAITitleGenerator(
+                self.logger,
+                api_key,
+                model=config.get("model", "gpt-5.6-luna"),
+                timeout_seconds=config.get("timeout_seconds", 10),
+                max_body_chars_per_email=config.get(
+                    "max_body_chars_per_email", 8000
+                ),
+                max_batch_chars=config.get("max_batch_chars", 24000),
+            )
+        except Exception as exception:
+            self.logger.error(
+                "Failed to initialize OpenAI title generation (%s); using original "
+                "email subjects",
+                type(exception).__name__,
+            )
+            return None
 
     def start(self):
         self.setup_logging()
@@ -157,6 +207,7 @@ class IMAPWatch:
                     self.config["smtp"].get("password"),
                     self.config["smtp"]["from"],
                 )
+                title_generator = self.create_title_generator()
 
                 self.logger.info("Setting up mailboxes")
                 for account in self.config["accounts"]:
@@ -168,7 +219,15 @@ class IMAPWatch:
                             if a["action"] == mailbox["action"]
                         ][0]
                         checker = self.create_checker(
-                            account, mailbox, action, sender
+                            account,
+                            mailbox,
+                            action,
+                            sender,
+                            title_generator=(
+                                title_generator
+                                if self.action_uses_openai_title(action)
+                                else None
+                            ),
                         )
                         checker_thread = CheckerThread(self.logger, checker)
                         self.threads.append(checker_thread)
