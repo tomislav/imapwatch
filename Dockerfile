@@ -16,7 +16,7 @@ RUN pip install --no-cache-dir lockfile PyYAML python-daemon imapclient boto3
 # Create the required log directory
 RUN mkdir -p /app/log
 
-# Check that the tracked imapwatch process is still alive.
+# Check that every configured mailbox watcher is connected and active.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD ["python3", "imapwatch", "--quiet", "status"]
 

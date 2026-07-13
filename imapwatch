@@ -5,6 +5,7 @@ import os
 import time
 import sys
 import subprocess
+import json
 from lockfile import AlreadyLocked, LockTimeout, NotLocked
 from subprocess import CalledProcessError
 from argparse import ArgumentParser
@@ -38,7 +39,16 @@ if __name__ == "__main__":
             pidfile.release()
 
         if(not args.daemon or ("imapwatch_context" in os.environ and os.environ["imapwatch_context"] == "subprocess")):
-            imapwatch = IMAPWatch(args.basedir, args.configfile, args.pidfile, args.logfile, args.daemon, args.loglevel, args.force)
+            imapwatch = IMAPWatch(
+                args.basedir,
+                args.configfile,
+                args.pidfile,
+                args.logfile,
+                args.daemon,
+                args.loglevel,
+                args.force,
+                healthfile=args.healthfile,
+            )
             imapwatch.start()
         else:
             try:
@@ -90,10 +100,33 @@ if __name__ == "__main__":
             if not pid:
                 raise SystemExit("No running imapwatch process found")
             os.kill(pid, 0)
-            print(f"Found running imapwatch process with pid {pid}")
         except OSError:
             pidfile.break_lock()
             raise SystemExit("No running imapwatch process found. Cleaning up stale lockfile")
+
+        try:
+            with open(args.healthfile, "r", encoding="UTF-8") as health_file:
+                health = json.load(health_file)
+        except (OSError, ValueError) as exception:
+            raise SystemExit(f"imapwatch health state is unavailable: {exception}")
+
+        if health.get("pid") != pid:
+            raise SystemExit("imapwatch health state belongs to another process")
+
+        age = time.time() - health.get("updated_at", 0)
+        if age > 10:
+            raise SystemExit(f"imapwatch health state is stale ({age:.1f} seconds old)")
+
+        if not health.get("healthy", False):
+            unhealthy = [
+                checker.get("mailbox", "unknown")
+                for checker in health.get("checkers", [])
+                if not checker.get("healthy", False)
+            ]
+            detail = ", ".join(unhealthy) or "no active mailbox checkers"
+            raise SystemExit(f"imapwatch mailbox checkers are unhealthy: {detail}")
+
+        print(f"Found healthy imapwatch process with pid {pid}")
 
     def restart(args):
         stop(args)
@@ -122,6 +155,10 @@ if __name__ == "__main__":
                         action='store', dest='pidfile',
                         default='/tmp/imapwatch.pid',
                         help='Path to PID file, needs full path! - default: /tmp/imapwatch.pid')
+    parser.add_argument('--healthfile',
+                        action='store', dest='healthfile',
+                        default='/tmp/imapwatch.health',
+                        help='Path to health state file - default: /tmp/imapwatch.health')
 
     group = parser.add_mutually_exclusive_group()
     group.add_argument('-v', '--verbose',

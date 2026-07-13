@@ -2,6 +2,7 @@ __all__ = ["checker", "sender", "filelikelogger", "loggingdaemoncontext"]
 
 import time
 import logging
+import json
 import yaml
 import threading
 import daemon
@@ -26,6 +27,7 @@ class IMAPWatch:
         daemon=False,
         verbose=None,
         force=False,
+        healthfile="/tmp/imapwatch.health",
     ):
         if basedir:
             # basedir must be a full, absolute path
@@ -48,6 +50,7 @@ class IMAPWatch:
             raise SystemExit("No config file found. Exiting.")
 
         self.pidfile = TimeoutPIDLockFile(pidfile, timeout=1)
+        self.healthfile = healthfile
         self.logfile = os.path.join(__location__, logfile)
         self.daemon = daemon
         self.verbose = verbose
@@ -55,6 +58,51 @@ class IMAPWatch:
 
         self.stop_event = threading.Event()
         self.threads = []
+
+    def write_health(self):
+        """Atomically publish application health for the external status command."""
+        now = time.time()
+        checker_states = []
+        for thread in self.threads:
+            checker = thread.checker
+            thread_alive = thread.is_alive()
+            heartbeat_age = now - checker.last_activity if checker.last_activity else None
+            healthy = (
+                thread_alive
+                and checker.connected
+                and heartbeat_age is not None
+                and heartbeat_age <= 60
+            )
+            checker_states.append(
+                {
+                    "mailbox": thread.name,
+                    "thread_alive": thread_alive,
+                    "connected": checker.connected,
+                    "heartbeat_age": heartbeat_age,
+                    "healthy": healthy,
+                }
+            )
+
+        state = {
+            "pid": os.getpid(),
+            "updated_at": now,
+            "healthy": bool(checker_states)
+            and all(checker["healthy"] for checker in checker_states),
+            "checkers": checker_states,
+        }
+        temporary_file = f"{self.healthfile}.{os.getpid()}.tmp"
+        with open(temporary_file, "w", encoding="UTF-8") as health_file:
+            json.dump(state, health_file)
+        os.replace(temporary_file, self.healthfile)
+
+    def remove_health(self):
+        try:
+            with open(self.healthfile, "r", encoding="UTF-8") as health_file:
+                health = json.load(health_file)
+            if health.get("pid") == os.getpid():
+                os.unlink(self.healthfile)
+        except (OSError, ValueError):
+            pass
 
     def start(self):
         self.setup_logging()
@@ -120,7 +168,26 @@ class IMAPWatch:
                 # we have to do this, otherwise we lose the context and lockfile
                 # (after all the threads have been created and detached)
                 while not self.stop_event.is_set():
-                    time.sleep(1)
+                    dead_threads = [t.name for t in self.threads if not t.is_alive()]
+                    self.write_health()
+                    if dead_threads:
+                        names = ", ".join(dead_threads)
+                        self.logger.critical(
+                            f"Checker thread stopped unexpectedly: {names}"
+                        )
+                        self.stop_event.set()
+                        for thread in self.threads:
+                            if thread.is_alive():
+                                thread.stop()
+                        for thread in self.threads:
+                            thread.join()
+                        # Exiting the main process makes the existing PID-based
+                        # Docker healthcheck truthful and lets the restart policy
+                        # recover the service.
+                        raise RuntimeError(
+                            f"Checker thread stopped unexpectedly: {names}"
+                        )
+                    self.stop_event.wait(1)
         except FileExistsError:
             self.logger.debug("Removed stale lock file")
             self.pidfile.break_lock()
@@ -133,6 +200,8 @@ class IMAPWatch:
         except NotLocked:
             raise SystemExit("NotLocked")
             pass
+        finally:
+            self.remove_health()
 
     def setup_logging(self):
         # configure logging

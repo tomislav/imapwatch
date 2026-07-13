@@ -45,6 +45,8 @@ class Checker:
         self.check_for = check_for
         self.action = action
         self.sender = sender
+        self.connected = False
+        self.last_activity = 0
         if use_ssl:
             self.ssl_context = ssl.create_default_context()
         self.last_sync = datetime.datetime.now()
@@ -55,6 +57,8 @@ class Checker:
         )
         self.server.login(self.username, self.password)
         self.server.select_folder(self.mailbox)
+        self.connected = True
+        self.last_activity = time.time()
         self.logger.info(f"Connected to mailbox {self.mailbox}")
 
     def timestamps_difference(self, timestamp):
@@ -227,6 +231,12 @@ class Checker:
         # we keep running until stop_event is set
         while not self.stop_event.is_set():
             try:
+                # Connect here, inside the recovery boundary.  A reconnect can fail
+                # too (for example while the IMAP server is returning an internal
+                # error), and must not be allowed to terminate the checker thread.
+                if self.server is None:
+                    self.connect()
+
                 self.logger.debug(f"Starting IDLE for {self.mailbox}")
                 self.server.idle()
                 self.last_sync = datetime.datetime.now()
@@ -236,8 +246,9 @@ class Checker:
 
                     # Wait for untagged responses (new mail, flag changes, etc.)
                     responses = self.server.idle_check(timeout=10)
+                    self.last_activity = time.time()
                     self.logger.debug(f"{self.mailbox}: IDLE responses: {responses}")
-                    
+
                     if isinstance(responses, list) and len(responses) > 0:
                         messages = self.check_messages(responses)
                         if messages:
@@ -252,11 +263,13 @@ class Checker:
                                 pass
 
                             items = self.fetch_messages(messages)
+                            self.last_activity = time.time()
                             if items:
                                 self.dispatch(items)
 
                             # Go back to IDLE
                             self.server.noop()
+                            self.last_activity = time.time()
                             self.server.idle()
                             self.last_sync = current_sync
 
@@ -268,6 +281,7 @@ class Checker:
                         except Exception:
                             pass
                         self.server.noop()
+                        self.last_activity = time.time()
                         self.server.idle()
                         self.last_sync = current_sync
 
@@ -281,6 +295,7 @@ class Checker:
                 ssl.SSLError,
                 ssl.SSLEOFError,
             ) as exception:
+                self.connected = False
                 self.logger.critical(
                     f"Checker: Got exception @ {self.mailbox}: {exception}"
                 )
@@ -291,30 +306,35 @@ class Checker:
                 self.logger.info("Reconnecting in 5 seconds…")
 
                 # best-effort cleanup of the old connection
-                try:
-                    self.server.idle_done()
-                except Exception:
-                    pass
-                try:
-                    self.server.logout()
-                except Exception:
-                    pass
+                if self.server is not None:
+                    try:
+                        self.server.idle_done()
+                    except Exception:
+                        pass
+                    try:
+                        self.server.logout()
+                    except Exception:
+                        pass
+                self.server = None
 
-                time.sleep(5)
-                # this may raise; if it does, loop will catch again
-                self.connect()
-                # continue outer while-loop; DO NOT call self.idle_loop() recursively
+                # Event.wait makes shutdown immediate instead of making it wait for
+                # the entire reconnect delay.
+                if self.stop_event.wait(5):
+                    break
                 continue
 
         # Clean shutdown
-        try:
-            self.server.idle_done()
-        except Exception:
-            pass
-        try:
-            self.server.logout()
-        except Exception:
-            pass
+        if self.server is not None:
+            try:
+                self.server.idle_done()
+            except Exception:
+                pass
+            try:
+                self.server.logout()
+            except Exception:
+                pass
+        self.connected = False
+        self.server = None
 
     def stop(self):
         self.stop_event.set()
@@ -327,7 +347,6 @@ class CheckerThread(threading.Thread):
         threading.Thread.__init__(self, name=checker.mailbox)
 
     def run(self):
-        self.checker.connect()
         self.checker.idle_loop()
 
     def stop(self):
