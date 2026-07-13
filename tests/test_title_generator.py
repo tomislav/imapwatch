@@ -1,7 +1,7 @@
 import json
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from lib.imapwatch.title_generator import GeneratedTitle, OpenAITitleGenerator
 
@@ -45,10 +45,21 @@ class OpenAITitleGeneratorTests(unittest.TestCase):
     def test_success_returns_structured_title(self):
         generator = self.make_generator(model="test-model")
         self.client.responses.parse.return_value = SimpleNamespace(
-            output_parsed=GeneratedTitle(title="Review both proposals")
+            id="resp_test",
+            output_parsed=GeneratedTitle(title="Review both proposals"),
+            usage=SimpleNamespace(input_tokens=42, output_tokens=7),
         )
 
-        title = generator.generate(make_items())
+        with patch(
+            "lib.imapwatch.title_generator.time.monotonic",
+            side_effect=[10.0, 10.123],
+        ):
+            title = generator.generate(
+                make_items(),
+                account="provider",
+                mailbox="INBOX",
+                action="things",
+            )
 
         self.assertEqual(title, "Review both proposals")
         request = self.client.responses.parse.call_args.kwargs
@@ -65,6 +76,27 @@ class OpenAITitleGeneratorTests(unittest.TestCase):
         self.assertIn("Do not use emojis", request["instructions"])
         self.assertIn(
             "Read Durga Kalariya's LinkedIn message", request["instructions"]
+        )
+        self.assertEqual(
+            self.logger.debug.call_args_list,
+            [
+                call(
+                    "event=openai_title_started account=provider mailbox=INBOX "
+                    "action=things model=test-model count=2"
+                ),
+                call(
+                    'event=openai_title_content account=provider mailbox=INBOX '
+                    'action=things title="Review both proposals"'
+                ),
+            ],
+        )
+        self.logger.info.assert_called_once_with(
+            "event=openai_title_succeeded account=provider mailbox=INBOX "
+            "action=things model=test-model count=2 duration_ms=123 "
+            "response_id=resp_test input_tokens=42 output_tokens=7"
+        )
+        self.assertNotIn(
+            "Review both proposals", self.logger.info.call_args.args[0]
         )
 
     def test_batch_budget_is_shared_across_every_email(self):
@@ -121,11 +153,23 @@ class OpenAITitleGeneratorTests(unittest.TestCase):
         generator = self.make_generator()
         self.client.responses.parse.side_effect = RuntimeError("request failed")
 
-        title = generator.generate(
-            [{"subject": "Private subject", "body": "Private body"}]
-        )
+        with patch(
+            "lib.imapwatch.title_generator.time.monotonic",
+            side_effect=[20.0, 20.25],
+        ):
+            title = generator.generate(
+                [{"subject": "Private subject", "body": "Private body"}],
+                account="private-account",
+                mailbox="INBOX",
+                action="things",
+            )
 
         self.assertIsNone(title)
+        self.logger.warning.assert_called_once_with(
+            "event=openai_title_failed account=private-account mailbox=INBOX "
+            "action=things model=gpt-5.6-luna count=1 duration_ms=250 "
+            "error_type=RuntimeError fallback=original_subject"
+        )
         warning = " ".join(str(value) for value in self.logger.warning.call_args.args)
         self.assertNotIn("Private subject", warning)
         self.assertNotIn("Private body", warning)

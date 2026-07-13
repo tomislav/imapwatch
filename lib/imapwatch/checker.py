@@ -14,6 +14,7 @@ from email.parser import BytesParser
 from html.parser import HTMLParser
 import re
 from urllib.parse import quote_plus
+from .logging_utils import log_event
 from .sender import SenderThread
 
 
@@ -77,6 +78,7 @@ class Checker:
         remove_flag_after_processing=False,
         archive_after_processing=None,
         title_generator=None,
+        account="account-1",
     ):
         (
             self.server,
@@ -91,9 +93,11 @@ class Checker:
         self.username = username
         self.password = password
         self.timeout = timeout
+        self.account = account
         self.mailbox = mailbox
         self.check_for = check_for
         self.action = action
+        self.action_name = action["action"]
         self.sender = sender
         self.use_ssl = use_ssl
         self.remove_flag_after_processing = remove_flag_after_processing
@@ -101,11 +105,26 @@ class Checker:
         self.title_generator = title_generator
         self.connected = False
         self.last_activity = 0
+        self.reconnect_attempts = 0
         if use_ssl:
             self.ssl_context = ssl.create_default_context()
         self.last_sync = datetime.datetime.now()
 
+    def log(self, level, event, *, exc_info=False, **fields):
+        log_event(
+            self.logger,
+            level,
+            event,
+            exc_info=exc_info,
+            account=self.account,
+            mailbox=self.mailbox,
+            action=self.action_name,
+            **fields,
+        )
+
     def connect(self):
+        started_at = time.monotonic()
+        reconnect_attempt = self.reconnect_attempts or None
         self.server = imapclient.IMAPClient(
             self.server_address,
             ssl=self.use_ssl,
@@ -116,7 +135,15 @@ class Checker:
         self.server.select_folder(self.mailbox)
         self.connected = True
         self.last_activity = time.time()
-        self.logger.info(f"Connected to mailbox {self.mailbox}")
+        self.reconnect_attempts = 0
+        self.log(
+            "info",
+            "mailbox_connected",
+            server=self.server_address,
+            use_ssl=self.use_ssl,
+            reconnect_attempt=reconnect_attempt,
+            duration_ms=round((time.monotonic() - started_at) * 1000),
+        )
 
     def timestamps_difference(self, timestamp):
         delta = timestamp - self.last_sync
@@ -196,8 +223,6 @@ class Checker:
 
     def decode_header(self, header):
         h = email.header.decode_header(header.decode())
-        # self.logger.debug(f"h: {h}")
-        # elements = [ i[0].decode(i[1]) if i[1] else i[0] for i in h ]
         elements = []
         for i in h:
             if i[1]:
@@ -221,8 +246,17 @@ class Checker:
         fetch_result = self.server.fetch(messages, fetch_fields)
         for fetch_id, data in fetch_result.items():
             if b"ENVELOPE" not in data:
-                self.logger.warning(
-                    f"{self.mailbox}: missing ENVELOPE for message {fetch_id}, data keys={list(data.keys())}"
+                self.log(
+                    "warning",
+                    "message_fetch_failed",
+                    sequence_number=fetch_id,
+                    error_type="MissingEnvelope",
+                    data_keys=[
+                        key.decode(errors="replace")
+                        if isinstance(key, bytes)
+                        else str(key)
+                        for key in data.keys()
+                    ],
                 )
                 continue
 
@@ -258,7 +292,14 @@ class Checker:
             if self.title_generator is not None:
                 item["body"] = self.extract_body(data.get(b"BODY[]"))
             items.append(item)
-            self.logger.info(f"Flagged item: {from_} / {subject}")
+            self.log(
+                "debug",
+                "message_fetched",
+                sequence_number=fetch_id,
+                uid=item["uid"],
+                sender=from_,
+                subject=subject,
+            )
 
         return items
 
@@ -290,10 +331,10 @@ class Checker:
         try:
             message = BytesParser(policy=policy.default).parsebytes(raw_message)
         except Exception as exception:
-            self.logger.warning(
-                "%s: failed to parse message body (%s)",
-                self.mailbox,
-                type(exception).__name__,
+            self.log(
+                "warning",
+                "message_body_parse_failed",
+                error_type=type(exception).__name__,
             )
             return ""
 
@@ -330,16 +371,17 @@ class Checker:
             parser.feed(" ".join(html_parts))
             parser.close()
         except Exception as exception:
-            self.logger.warning(
-                "%s: failed to convert HTML message body (%s)",
-                self.mailbox,
-                type(exception).__name__,
+            self.log(
+                "warning",
+                "message_html_conversion_failed",
+                error_type=type(exception).__name__,
             )
             return ""
         return self._normalise_body(parser.text())
 
     def dispatch(self, items):
         uids = [item["uid"] for item in items if item.get("uid") is not None]
+        title_source = "subject"
 
         if self.action["action"] in {"things", "omnifocus"}:
             subject = items[0]["subject"]
@@ -351,15 +393,23 @@ class Checker:
             )
             if self.title_generator is not None:
                 try:
-                    generated_title = self.title_generator.generate(items)
+                    generated_title = self.title_generator.generate(
+                        items,
+                        account=self.account,
+                        mailbox=self.mailbox,
+                        action=self.action_name,
+                    )
                 except Exception as exception:
-                    self.logger.warning(
-                        "OpenAI title generation failed (%s); using original email subject",
-                        type(exception).__name__,
+                    self.log(
+                        "warning",
+                        "openai_title_failed",
+                        error_type=type(exception).__name__,
+                        fallback="original_subject",
                     )
                     generated_title = None
                 if generated_title:
                     subject = generated_title
+                    title_source = "openai"
 
         # TODO: create this action
         elif self.action["action"] == "resend":
@@ -370,14 +420,35 @@ class Checker:
         if self.remove_flag_after_processing or self.archive_after_processing:
             on_success = lambda: self.post_process(uids)
 
+        self.log(
+            "info",
+            "dispatch_started",
+            count=len(items),
+            uids=uids,
+            title_source=title_source,
+        )
+        self.log(
+            "debug",
+            "dispatch_content",
+            destination=self.action["email"],
+            title=subject,
+        )
+
         SenderThread(
-            "Sender",
+            f"smtp:{self.account}:{self.mailbox}",
             self.logger,
             self.sender,
             self.action["email"],
             subject,
             body,
             on_success=on_success,
+            context={
+                "account": self.account,
+                "mailbox": self.mailbox,
+                "action": self.action_name,
+                "count": len(items),
+                "uids": uids,
+            },
         ).start()
 
     def post_process(self, uids):
@@ -387,6 +458,7 @@ class Checker:
         ):
             return
 
+        started_at = time.monotonic()
         cleanup_server = None
         flag_removed = False
         archive_strategy = None
@@ -405,9 +477,15 @@ class Checker:
 
             if self.archive_after_processing:
                 if not cleanup_server.folder_exists(self.archive_after_processing):
-                    self.logger.error(
-                        f"{self.mailbox}: cannot archive processed messages because "
-                        f"folder {self.archive_after_processing!r} does not exist"
+                    self.log(
+                        "error",
+                        "post_process_failed",
+                        uids=uids,
+                        archive_folder=self.archive_after_processing,
+                        duration_ms=round(
+                            (time.monotonic() - started_at) * 1000
+                        ),
+                        error_type="MissingArchiveFolder",
                     )
                     return
                 if cleanup_server.has_capability("MOVE"):
@@ -415,9 +493,15 @@ class Checker:
                 elif cleanup_server.has_capability("UIDPLUS"):
                     archive_strategy = "copy-delete"
                 else:
-                    self.logger.error(
-                        f"{self.mailbox}: cannot archive processed messages because "
-                        "the server supports neither MOVE nor UIDPLUS"
+                    self.log(
+                        "error",
+                        "post_process_failed",
+                        uids=uids,
+                        archive_folder=self.archive_after_processing,
+                        duration_ms=round(
+                            (time.monotonic() - started_at) * 1000
+                        ),
+                        error_type="UnsupportedArchiveStrategy",
                     )
                     return
 
@@ -443,12 +527,17 @@ class Checker:
 
             operations = []
             if self.remove_flag_after_processing:
-                operations.append("removed flag")
+                operations.append("remove_flag")
             if self.archive_after_processing:
-                operations.append(f"archived to {self.archive_after_processing!r}")
-            self.logger.info(
-                f"{self.mailbox}: post-processed messages {uids}: "
-                f"{', '.join(operations)}"
+                operations.append("archive")
+            self.log(
+                "info",
+                "post_process_succeeded",
+                uids=uids,
+                operations=operations,
+                archive_folder=self.archive_after_processing,
+                archive_strategy=archive_strategy,
+                duration_ms=round((time.monotonic() - started_at) * 1000),
             )
         except Exception as exception:
             partial_states = []
@@ -461,16 +550,18 @@ class Checker:
             elif copied:
                 partial_states.append("the source remains in the watched mailbox")
 
-            stage = f" during {fallback_stage}" if fallback_stage else ""
-            partial = (
-                f"; partial state: {', '.join(partial_states)}"
-                if partial_states
-                else ""
-            )
-            self.logger.error(
-                f"{self.mailbox}: failed to post-process messages {uids}{stage}: "
-                f"{exception}{partial}",
+            self.log(
+                "error",
+                "post_process_failed",
                 exc_info=True,
+                uids=uids,
+                stage=fallback_stage,
+                partial_state=partial_states or None,
+                archive_folder=self.archive_after_processing,
+                archive_strategy=archive_strategy,
+                duration_ms=round((time.monotonic() - started_at) * 1000),
+                error_type=type(exception).__name__,
+                error=str(exception),
             )
         finally:
             if cleanup_server is not None:
@@ -481,6 +572,21 @@ class Checker:
                         cleanup_server.shutdown()
                     except Exception:
                         pass
+
+    @staticmethod
+    def _response_types(responses):
+        response_types = []
+        if not isinstance(responses, list):
+            return response_types
+        for response in responses:
+            if not isinstance(response, (list, tuple)) or len(response) < 2:
+                response_types.append(type(response).__name__)
+                continue
+            response_type = response[1]
+            if isinstance(response_type, bytes):
+                response_type = response_type.decode(errors="replace")
+            response_types.append(str(response_type))
+        return response_types
 
     def idle_loop(self):
         """Main loop: maintain an IDLE connection and react to events."""
@@ -493,7 +599,7 @@ class Checker:
                 if self.server is None:
                     self.connect()
 
-                self.logger.debug(f"Starting IDLE for {self.mailbox}")
+                self.log("debug", "idle_started")
                 self.server.idle()
                 self.last_sync = datetime.datetime.now()
 
@@ -503,13 +609,21 @@ class Checker:
                     # Wait for untagged responses (new mail, flag changes, etc.)
                     responses = self.server.idle_check(timeout=10)
                     self.last_activity = time.time()
-                    self.logger.debug(f"{self.mailbox}: IDLE responses: {responses}")
+                    self.log(
+                        "debug",
+                        "idle_responses",
+                        count=len(responses) if isinstance(responses, list) else 0,
+                        response_types=self._response_types(responses),
+                    )
 
                     if isinstance(responses, list) and len(responses) > 0:
                         messages = self.check_messages(responses)
                         if messages:
-                            self.logger.info(
-                                f"{self.mailbox}: processing messages {messages}"
+                            self.log(
+                                "info",
+                                "messages_detected",
+                                count=len(messages),
+                                sequence_numbers=messages,
                             )
                             # Leave IDLE mode so we can FETCH
                             try:
@@ -531,7 +645,7 @@ class Checker:
 
                     # Periodically refresh IDLE so servers don’t kill us silently
                     if self.timestamps_difference(current_sync) > self.timeout:
-                        self.logger.debug("Refreshing IDLE timeout")
+                        self.log("debug", "idle_refreshed")
                         try:
                             self.server.idle_done()
                         except Exception:
@@ -552,14 +666,25 @@ class Checker:
                 ssl.SSLEOFError,
             ) as exception:
                 self.connected = False
-                self.logger.critical(
-                    f"Checker: Got exception @ {self.mailbox}: {exception}"
+                self.reconnect_attempts += 1
+                self.log(
+                    "warning",
+                    "imap_connection_lost",
+                    retry_in_seconds=5,
+                    reconnect_attempt=self.reconnect_attempts,
+                    error_type=type(exception).__name__,
+                    error=str(exception),
                 )
 
                 if self.stop_event.is_set():
                     break
 
-                self.logger.info("Reconnecting in 5 seconds…")
+                self.log(
+                    "info",
+                    "reconnect_scheduled",
+                    retry_in_seconds=5,
+                    reconnect_attempt=self.reconnect_attempts,
+                )
 
                 # best-effort cleanup of the old connection
                 if self.server is not None:
@@ -591,6 +716,7 @@ class Checker:
                 pass
         self.connected = False
         self.server = None
+        self.log("info", "mailbox_disconnected", reason="shutdown")
 
     def stop(self):
         self.stop_event.set()
@@ -600,7 +726,9 @@ class CheckerThread(threading.Thread):
     def __init__(self, logger, checker: Checker):
         self.logger = logger
         self.checker = checker
-        threading.Thread.__init__(self, name=checker.mailbox)
+        threading.Thread.__init__(
+            self, name=f"imap:{checker.account}:{checker.mailbox}"
+        )
 
     def run(self):
         self.checker.idle_loop()

@@ -2,6 +2,7 @@ __all__ = [
     "checker",
     "sender",
     "title_generator",
+    "logging_utils",
     "filelikelogger",
     "loggingdaemoncontext",
 ]
@@ -20,6 +21,7 @@ from daemon.pidfile import TimeoutPIDLockFile
 from lockfile import AlreadyLocked, LockTimeout, NotLocked
 from .sender import Sender
 from .checker import Checker, CheckerThread
+from .logging_utils import log_event
 from .loggingdaemoncontext import LoggingDaemonContext
 from .title_generator import OpenAITitleGenerator
 
@@ -82,7 +84,10 @@ class IMAPWatch:
             )
             checker_states.append(
                 {
-                    "mailbox": thread.name,
+                    "account": checker.account,
+                    "mailbox": checker.mailbox,
+                    "action": checker.action_name,
+                    "thread_name": thread.name,
                     "thread_alive": thread_alive,
                     "connected": checker.connected,
                     "heartbeat_age": heartbeat_age,
@@ -111,7 +116,15 @@ class IMAPWatch:
         except (OSError, ValueError):
             pass
 
-    def create_checker(self, account, mailbox, action, sender, title_generator=None):
+    def create_checker(
+        self,
+        account,
+        mailbox,
+        action,
+        sender,
+        title_generator=None,
+        account_label=None,
+    ):
         return Checker(
             self.logger,
             self.stop_event,
@@ -129,6 +142,7 @@ class IMAPWatch:
             ),
             archive_after_processing=mailbox.get("archive_after_processing"),
             title_generator=title_generator,
+            account=account_label or account.get("account") or "account-1",
         )
 
     @staticmethod
@@ -137,6 +151,10 @@ class IMAPWatch:
             action.get("action") in {"things", "omnifocus"}
             and action.get("title_generator") == "openai"
         )
+
+    @staticmethod
+    def account_label(account, index):
+        return account.get("account") or f"account-{index + 1}"
 
     def create_title_generator(self):
         if not any(
@@ -147,29 +165,47 @@ class IMAPWatch:
 
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
-            self.logger.error(
-                "OpenAI title generation is enabled but OPENAI_API_KEY is not set; "
-                "using original email subjects"
+            log_event(
+                self.logger,
+                "error",
+                "openai_title_disabled",
+                reason="missing_api_key",
+                fallback="original_subject",
             )
             return None
 
         config = self.config.get("openai", {})
+        model = config.get("model", "gpt-5.6-luna")
+        timeout_seconds = config.get("timeout_seconds", 10)
+        max_body_chars_per_email = config.get("max_body_chars_per_email", 8000)
+        max_batch_chars = config.get("max_batch_chars", 24000)
         try:
-            return OpenAITitleGenerator(
+            title_generator = OpenAITitleGenerator(
                 self.logger,
                 api_key,
-                model=config.get("model", "gpt-5.6-luna"),
-                timeout_seconds=config.get("timeout_seconds", 10),
-                max_body_chars_per_email=config.get(
-                    "max_body_chars_per_email", 8000
-                ),
-                max_batch_chars=config.get("max_batch_chars", 24000),
+                model=model,
+                timeout_seconds=timeout_seconds,
+                max_body_chars_per_email=max_body_chars_per_email,
+                max_batch_chars=max_batch_chars,
             )
+            log_event(
+                self.logger,
+                "info",
+                "openai_title_enabled",
+                model=model,
+                timeout_seconds=timeout_seconds,
+                max_body_chars_per_email=max_body_chars_per_email,
+                max_batch_chars=max_batch_chars,
+            )
+            return title_generator
         except Exception as exception:
-            self.logger.error(
-                "Failed to initialize OpenAI title generation (%s); using original "
-                "email subjects",
-                type(exception).__name__,
+            log_event(
+                self.logger,
+                "error",
+                "openai_title_disabled",
+                reason="initialization_failed",
+                error_type=type(exception).__name__,
+                fallback="original_subject",
             )
             return None
 
@@ -198,8 +234,19 @@ class IMAPWatch:
         # then do the same in the DaemonContext
         try:
             with context as c:
-                self.logger.info("---------------")
-                self.logger.info(f"Starting daemon with pid {self.pidfile.read_pid()}")
+                accounts = self.config["accounts"]
+                mailbox_count = sum(
+                    len(account.get("mailboxes", [])) for account in accounts
+                )
+                log_event(
+                    self.logger,
+                    "info",
+                    "app_started",
+                    pid=self.pidfile.read_pid(),
+                    account_count=len(accounts),
+                    mailbox_count=mailbox_count,
+                    daemon=self.daemon,
+                )
                 sender = Sender(
                     self.logger,
                     self.config["smtp"]["server"],
@@ -209,8 +256,8 @@ class IMAPWatch:
                 )
                 title_generator = self.create_title_generator()
 
-                self.logger.info("Setting up mailboxes")
-                for account in self.config["accounts"]:
+                for account_index, account in enumerate(accounts):
+                    account_label = self.account_label(account, account_index)
                     mailboxes = account["mailboxes"]
                     for mailbox in mailboxes:
                         action = [
@@ -228,20 +275,46 @@ class IMAPWatch:
                                 if self.action_uses_openai_title(action)
                                 else None
                             ),
+                            account_label=account_label,
                         )
                         checker_thread = CheckerThread(self.logger, checker)
                         self.threads.append(checker_thread)
+                        log_event(
+                            self.logger,
+                            "info",
+                            "checker_started",
+                            account=checker.account,
+                            mailbox=checker.mailbox,
+                            action=checker.action_name,
+                            server=checker.server_address,
+                            check_for=checker.check_for,
+                            use_ssl=checker.use_ssl,
+                            remove_flag_after_processing=(
+                                checker.remove_flag_after_processing
+                            ),
+                            archive_after_processing=(
+                                checker.archive_after_processing
+                            ),
+                            title_generator=checker.title_generator is not None,
+                        )
                         checker_thread.start()
 
                 # we have to do this, otherwise we lose the context and lockfile
                 # (after all the threads have been created and detached)
                 while not self.stop_event.is_set():
-                    dead_threads = [t.name for t in self.threads if not t.is_alive()]
+                    dead_threads = [t for t in self.threads if not t.is_alive()]
                     self.write_health()
                     if dead_threads:
-                        names = ", ".join(dead_threads)
-                        self.logger.critical(
-                            f"Checker thread stopped unexpectedly: {names}"
+                        identities = [
+                            f"{thread.checker.account}/{thread.checker.mailbox}"
+                            for thread in dead_threads
+                        ]
+                        log_event(
+                            self.logger,
+                            "critical",
+                            "checker_died",
+                            count=len(dead_threads),
+                            checkers=identities,
                         )
                         self.stop_event.set()
                         for thread in self.threads:
@@ -253,11 +326,12 @@ class IMAPWatch:
                         # Docker healthcheck truthful and lets the restart policy
                         # recover the service.
                         raise RuntimeError(
-                            f"Checker thread stopped unexpectedly: {names}"
+                            "Checker thread stopped unexpectedly: "
+                            + ", ".join(identities)
                         )
                     self.stop_event.wait(1)
         except FileExistsError:
-            self.logger.debug("Removed stale lock file")
+            log_event(self.logger, "debug", "stale_lock_removed")
             self.pidfile.break_lock()
         except AlreadyLocked:
             if not self.force:
@@ -274,7 +348,8 @@ class IMAPWatch:
     def setup_logging(self):
         # configure logging
         logFormatter = logging.Formatter(
-            "%(asctime)s %(name)-10.10s [%(process)-5d] [%(levelname)-8.8s] [%(threadName)-11.11s] %(message)s"
+            "%(asctime)s %(name)-10.10s [%(process)-5d] [%(levelname)-8.8s] "
+            "[%(threadName)s] %(message)s"
         )
         self.logger = logging.getLogger("imapwatch")
         # this shouldn't be necessary? level should be NOTSET standard
@@ -324,15 +399,15 @@ class IMAPWatch:
             self.imapclient_logger.addHandler(consoleHandler)
 
     def stop(self, signum, frame):
-        self.logger.debug("Stopping")
+        log_event(
+            self.logger,
+            "info",
+            "app_stopping",
+            signal=signum,
+            checker_count=len(self.threads),
+        )
         self.stop_event.set()
-        # TODO should we use threading.enumerate() to stop threads?
-        # https://docs.python.org/3/library/threading.html
         for t in self.threads:
-            # self.logger.debug(f'Calling stop() for thread {t.name}')
             t.stop()
-            # self.logger.debug(f'Finished stop() for thread {t.name}')
-            # self.logger.debug(f'Calling join() for thread {t.name}')
             t.join()
-            # self.logger.debug(f'Finshed join() for thread {t.name}')
-        self.logger.info("Stopped")
+        log_event(self.logger, "info", "app_stopped")

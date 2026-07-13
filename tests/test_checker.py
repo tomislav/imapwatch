@@ -162,6 +162,29 @@ class CheckerPostProcessingTests(unittest.TestCase):
 
         checker.server.fetch.assert_called_once_with([7], ["ENVELOPE", "UID"])
         self.assertEqual(items[0]["uid"], 1234)
+        checker.logger.info.assert_not_called()
+        self.assertEqual(
+            checker.logger.debug.call_args.args[0],
+            "event=message_fetched account=account-1 mailbox=INBOX "
+            "action=things sequence_number=7 uid=1234 sender=Sender subject=Subject",
+        )
+
+    def test_connection_log_includes_account_mailbox_action_and_duration(self):
+        event = threading.Event()
+        client = Client(event)
+        checker = make_checker(account="provider")
+
+        with patch(
+            "lib.imapwatch.checker.imapclient.IMAPClient", return_value=client
+        ), patch(
+            "lib.imapwatch.checker.time.monotonic", side_effect=[10.0, 10.184]
+        ):
+            checker.connect()
+
+        checker.logger.info.assert_called_once_with(
+            "event=mailbox_connected account=provider mailbox=INBOX "
+            "action=things server=imap.example.test use_ssl=false duration_ms=184"
+        )
 
     def test_opted_in_fetch_includes_body_without_marking_message_read(self):
         checker = make_checker(title_generator=Mock())
@@ -286,7 +309,12 @@ class CheckerPostProcessingTests(unittest.TestCase):
         with patch("lib.imapwatch.checker.SenderThread") as sender_thread:
             checker.dispatch(items)
 
-        generator.generate.assert_called_once_with(items)
+        generator.generate.assert_called_once_with(
+            items,
+            account="account-1",
+            mailbox="INBOX",
+            action="things",
+        )
         call_args = sender_thread.call_args.args
         self.assertEqual(call_args[4], "Review both proposals")
         self.assertEqual(
@@ -295,6 +323,14 @@ class CheckerPostProcessingTests(unittest.TestCase):
             '\u2709\ufe0f First: "One"\nmessage:1',
         )
         self.assertEqual(items[0]["subject"], "One")
+        info_message = checker.logger.info.call_args.args[0]
+        self.assertIn("event=dispatch_started", info_message)
+        self.assertIn("title_source=openai", info_message)
+        self.assertNotIn("Review both proposals", info_message)
+        self.assertNotIn("things@example.test", info_message)
+        debug_message = checker.logger.debug.call_args.args[0]
+        self.assertIn("Review both proposals", debug_message)
+        self.assertIn("things@example.test", debug_message)
 
     def test_dispatch_falls_back_to_subject_if_generator_raises(self):
         generator = Mock()
@@ -504,7 +540,7 @@ class CheckerPostProcessingTests(unittest.TestCase):
             checker.post_process([801])
 
         log_message = checker.logger.error.call_args.args[0]
-        self.assertIn("during COPY", log_message)
+        self.assertIn("stage=COPY", log_message)
         self.assertIn("flags were removed", log_message)
         self.assertNotIn("archive copy exists", log_message)
         self.assertTrue(cleanup.logged_out)
@@ -523,7 +559,7 @@ class CheckerPostProcessingTests(unittest.TestCase):
             checker.post_process([802])
 
         log_message = checker.logger.error.call_args.args[0]
-        self.assertIn("during marking source messages deleted", log_message)
+        self.assertIn('stage="marking source messages deleted"', log_message)
         self.assertIn("an archive copy exists", log_message)
         self.assertIn("source remains in the watched mailbox", log_message)
         self.assertNotIn(call.uid_expunge([802]), cleanup.calls)
@@ -545,9 +581,9 @@ class CheckerPostProcessingTests(unittest.TestCase):
             checker.post_process([803])
 
         log_message = checker.logger.error.call_args.args[0]
-        self.assertIn("during UID EXPUNGE", log_message)
+        self.assertIn('stage="UID EXPUNGE"', log_message)
         self.assertIn("an archive copy exists", log_message)
-        self.assertIn("source remains marked \\Deleted", log_message)
+        self.assertIn("source remains marked \\\\Deleted", log_message)
         self.assertTrue(cleanup.logged_out)
 
 
@@ -579,6 +615,21 @@ class CheckerConfigurationTests(unittest.TestCase):
 
         self.assertTrue(checker.remove_flag_after_processing)
         self.assertEqual(checker.archive_after_processing, "Archive")
+        self.assertEqual(checker.account, "account-1")
+
+    def test_account_label_prefers_config_and_has_indexed_fallback(self):
+        self.assertEqual(
+            self.watch.account_label({"account": "work"}, 3), "work"
+        )
+        self.assertEqual(self.watch.account_label({}, 0), "account-1")
+        self.assertEqual(self.watch.account_label({}, 1), "account-2")
+
+    def test_checker_thread_names_distinguish_same_mailbox_across_accounts(self):
+        work_thread = CheckerThread(Mock(), make_checker(account="work"))
+        personal_thread = CheckerThread(Mock(), make_checker(account="personal"))
+
+        self.assertEqual(work_thread.name, "imap:work:INBOX")
+        self.assertEqual(personal_thread.name, "imap:personal:INBOX")
 
     def test_mailbox_options_default_to_disabled(self):
         mailbox = {"mailbox": "INBOX", "check_for": ["flagged"]}
@@ -652,6 +703,10 @@ class CheckerConfigurationTests(unittest.TestCase):
             max_body_chars_per_email=500,
             max_batch_chars=1000,
         )
+        self.watch.logger.info.assert_called_once_with(
+            "event=openai_title_enabled model=custom-model timeout_seconds=4 "
+            "max_body_chars_per_email=500 max_batch_chars=1000"
+        )
 
     def test_resend_action_does_not_initialize_title_generation(self):
         self.watch.config = {
@@ -688,7 +743,7 @@ class CheckerReconnectTests(unittest.TestCase):
             ),
             Client(event),
         ]
-        logger = logging.getLogger(self.id())
+        logger = Mock()
         checker = Checker(
             logger,
             event,
@@ -711,6 +766,17 @@ class CheckerReconnectTests(unittest.TestCase):
         self.assertEqual(imap_client.call_count, 3)
         self.assertTrue(clients[-1].logged_out)
         self.assertFalse(checker.connected)
+        self.assertEqual(logger.warning.call_count, 2)
+        self.assertTrue(
+            all(
+                "event=imap_connection_lost" in logged.args[0]
+                and "account=account-1" in logged.args[0]
+                and "mailbox=INBOX" in logged.args[0]
+                for logged in logger.warning.call_args_list
+            )
+        )
+        logger.critical.assert_not_called()
+        self.assertEqual(checker_thread.name, "imap:account-1:INBOX")
 
 
 if __name__ == "__main__":

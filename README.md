@@ -109,6 +109,29 @@ missing, the request fails, or the response is not a valid single-line title of 
 characters, imapwatch logs the failure without email content and creates the task with the original
 first email subject. The existing combined task notes and message links are unchanged.
 
+At startup, imapwatch logs the active OpenAI model, timeout, and context limits. Each generation
+logs its start at debug level. Successful generations log the account, mailbox, action, model,
+email count, latency, response ID, and input/output token counts at info level; the generated title
+is logged only at debug level. Failures log operational metadata and the exception type without
+email content.
+
+### Logging
+
+Application events use searchable `event=... key=value` messages. Mailbox events include the
+configured `account`, `mailbox`, and `action`, for example:
+
+```text
+event=mailbox_connected account=provider mailbox=INBOX action=things duration_ms=184
+event=messages_detected account=provider mailbox=INBOX action=things count=1 sequence_numbers=[1]
+event=smtp_send_succeeded account=provider mailbox=INBOX action=things count=1 duration_ms=391
+```
+
+If an account has no `account` label, imapwatch assigns `account-1`, `account-2`, and so on in
+configuration order. INFO logs contain operational state, counts, identifiers, timing, and
+outcomes. Sender names, email subjects, generated titles, and delivery addresses are restricted to
+DEBUG. Email bodies, SMTP message contents, passwords, and API keys are never logged. Recoverable
+IMAP disconnects use WARNING while unexpected checker termination remains CRITICAL.
+
 `smtp.username` and `smtp.password` are optional for SMTP relays that do not require
 authentication. Omit both fields to send without calling SMTP `LOGIN`:
 

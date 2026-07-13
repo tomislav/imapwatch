@@ -25,7 +25,13 @@ class HealthStateTests(unittest.TestCase):
         self.healthfile = os.path.join(
             self.temporary_directory.name, "imapwatch.health"
         )
-        self.checker = SimpleNamespace(connected=True, last_activity=95)
+        self.checker = SimpleNamespace(
+            account="provider",
+            mailbox="INBOX",
+            action_name="things",
+            connected=True,
+            last_activity=95,
+        )
         self.thread = FakeThread(self.checker)
         self.watch = IMAPWatch.__new__(IMAPWatch)
         self.watch.healthfile = self.healthfile
@@ -42,6 +48,18 @@ class HealthStateTests(unittest.TestCase):
         health = self.read_health()
         self.assertTrue(health["healthy"])
         self.assertTrue(health["checkers"][0]["healthy"])
+        self.assertEqual(
+            {
+                key: health["checkers"][0][key]
+                for key in ("account", "mailbox", "action", "thread_name")
+            },
+            {
+                "account": "provider",
+                "mailbox": "INBOX",
+                "action": "things",
+                "thread_name": "INBOX",
+            },
+        )
 
     @patch("lib.imapwatch.time.time", return_value=200)
     def test_stale_checker_heartbeat_is_unhealthy(self, _time):
@@ -57,6 +75,28 @@ class HealthStateTests(unittest.TestCase):
         self.watch.write_health()
 
         self.assertFalse(self.read_health()["healthy"])
+
+    @patch("lib.imapwatch.time.time", return_value=100)
+    def test_same_mailbox_on_two_accounts_has_distinct_health_identity(self, _time):
+        second_checker = SimpleNamespace(
+            account="personal",
+            mailbox="INBOX",
+            action_name="omnifocus",
+            connected=True,
+            last_activity=95,
+        )
+        self.watch.threads.append(FakeThread(second_checker))
+
+        self.watch.write_health()
+
+        identities = [
+            (checker["account"], checker["mailbox"], checker["action"])
+            for checker in self.read_health()["checkers"]
+        ]
+        self.assertEqual(
+            identities,
+            [("provider", "INBOX", "things"), ("personal", "INBOX", "omnifocus")],
+        )
 
     @patch("lib.imapwatch.time.time", return_value=100)
     def test_health_state_is_removed_only_by_its_owner(self, _time):

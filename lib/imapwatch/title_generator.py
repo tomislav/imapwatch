@@ -1,8 +1,11 @@
 import json
 import re
+import time
 
 from openai import OpenAI
 from pydantic import BaseModel
+
+from .logging_utils import log_event
 
 
 DEFAULT_MODEL = "gpt-5.6-luna"
@@ -138,9 +141,25 @@ Title: Verify the new GitHub sign-in"""
             return None
         return title
 
-    def generate(self, items):
+    def generate(self, items, *, account=None, mailbox=None, action=None):
         if not items:
             return None
+
+        email_count = len(items)
+        started_at = time.monotonic()
+        context = {
+            "account": account,
+            "mailbox": mailbox,
+            "action": action,
+        }
+        log_event(
+            self.logger,
+            "debug",
+            "openai_title_started",
+            **context,
+            model=self.model,
+            count=email_count,
+        )
 
         try:
             response = self.client.responses.parse(
@@ -156,10 +175,39 @@ Title: Verify the new GitHub sign-in"""
             title = self._validate_title(getattr(parsed, "title", None))
             if title is None:
                 raise ValueError("OpenAI returned no valid title")
+
+            usage = getattr(response, "usage", None)
+            duration_ms = round((time.monotonic() - started_at) * 1000)
+            log_event(
+                self.logger,
+                "info",
+                "openai_title_succeeded",
+                **context,
+                model=self.model,
+                count=email_count,
+                duration_ms=duration_ms,
+                response_id=getattr(response, "id", None),
+                input_tokens=getattr(usage, "input_tokens", None),
+                output_tokens=getattr(usage, "output_tokens", None),
+            )
+            log_event(
+                self.logger,
+                "debug",
+                "openai_title_content",
+                **context,
+                title=title,
+            )
             return title
         except Exception as exception:
-            self.logger.warning(
-                "OpenAI title generation failed (%s); using original email subject",
-                type(exception).__name__,
+            log_event(
+                self.logger,
+                "warning",
+                "openai_title_failed",
+                **context,
+                model=self.model,
+                count=email_count,
+                duration_ms=round((time.monotonic() - started_at) * 1000),
+                error_type=type(exception).__name__,
+                fallback="original_subject",
             )
             return None

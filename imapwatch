@@ -119,7 +119,11 @@ if __name__ == "__main__":
 
         if not health.get("healthy", False):
             unhealthy = [
-                checker.get("mailbox", "unknown")
+                (
+                    f"{checker['account']}/{checker.get('mailbox', 'unknown')}"
+                    if checker.get("account")
+                    else checker.get("mailbox", "unknown")
+                )
                 for checker in health.get("checkers", [])
                 if not checker.get("healthy", False)
             ]
