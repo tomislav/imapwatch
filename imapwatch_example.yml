@@ -9,6 +9,8 @@ accounts:
       - mailbox: 'INBOX'
         check_for: ['flagged']
         action: 'things'
+        remove_flag_after_processing: true
+        archive_after_processing: 'Archive'
       - mailbox: '+Later'
         check_for: ['flagged']
         action: 'things'

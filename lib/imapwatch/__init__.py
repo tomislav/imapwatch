@@ -104,6 +104,25 @@ class IMAPWatch:
         except (OSError, ValueError):
             pass
 
+    def create_checker(self, account, mailbox, action, sender):
+        return Checker(
+            self.logger,
+            self.stop_event,
+            account["server"],
+            account["username"],
+            account["password"],
+            mailbox["mailbox"],
+            mailbox["check_for"],
+            action,
+            sender,
+            use_ssl=bool(account["use_ssl"]),
+            timeout=int(account["timeout"]),
+            remove_flag_after_processing=bool(
+                mailbox.get("remove_flag_after_processing", False)
+            ),
+            archive_after_processing=mailbox.get("archive_after_processing"),
+        )
+
     def start(self):
         self.setup_logging()
 
@@ -148,18 +167,8 @@ class IMAPWatch:
                             for a in self.config["actions"]
                             if a["action"] == mailbox["action"]
                         ][0]
-                        checker = Checker(
-                            self.logger,
-                            self.stop_event,
-                            account["server"],
-                            account["username"],
-                            account["password"],
-                            mailbox["mailbox"],
-                            mailbox["check_for"],
-                            action,
-                            sender,
-                            bool(account["use_ssl"]),
-                            int(account["timeout"]),
+                        checker = self.create_checker(
+                            account, mailbox, action, sender
                         )
                         checker_thread = CheckerThread(self.logger, checker)
                         self.threads.append(checker_thread)

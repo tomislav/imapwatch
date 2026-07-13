@@ -1,8 +1,6 @@
 import smtplib
 import threading
-import logging
 from email.mime.text import MIMEText
-from email.header import Header
 
 
 class Sender:
@@ -31,16 +29,34 @@ class Sender:
 
 
 class SenderThread(threading.Thread):
-    def __init__(self, name, logger, sender: Sender, to, subject, body):
+    def __init__(
+        self, name, logger, sender: Sender, to, subject, body, on_success=None
+    ):
         self.logger = logger
         self.sender = sender
         self.to = to
         self.subject = subject
         self.body = body
+        self.on_success = on_success
         threading.Thread.__init__(self, name=name)
 
     def run(self):
-        self.sender.send(self.to, self.subject, self.body)
+        try:
+            self.sender.send(self.to, self.subject, self.body)
+        except Exception as exception:
+            self.logger.error(
+                f"Failed to send message to {self.to}: {exception}", exc_info=True
+            )
+            return
+
+        if self.on_success is not None:
+            try:
+                self.on_success()
+            except Exception as exception:
+                self.logger.error(
+                    f"Post-send callback failed for {self.to}: {exception}",
+                    exc_info=True,
+                )
 
     def stop(self):
         self.sender.stop()

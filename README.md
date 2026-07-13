@@ -56,6 +56,8 @@ accounts:
       - mailbox: 'INBOX'
         check_for: ['flagged']
         action: 'things'
+        remove_flag_after_processing: true
+        archive_after_processing: 'Archive'
       - mailbox: '+Later'
         check_for: ['flagged']
         action: 'things'
@@ -76,6 +78,18 @@ smtp:
   password: 'mysecretpass'
   from: 'john@provider.com'
 ```
+
+Each watched mailbox can optionally change a message after its configured action has been sent
+successfully:
+
+- `remove_flag_after_processing: true` removes the standard IMAP `\Flagged` flag.
+- `archive_after_processing: 'Archive'` moves the message to the named folder. The folder must
+  already exist, and the IMAP server must support the standard `MOVE` capability.
+
+Both options are disabled when omitted and can be enabled independently. If both are enabled,
+imapwatch removes the flag before moving the message. SMTP delivery remains asynchronous; failed
+SMTP delivery leaves the original message untouched. Post-processing failures are logged and are
+not retried automatically.
 
 ## Want to help?
 

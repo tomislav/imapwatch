@@ -27,6 +27,8 @@ class Checker:
         sender,
         use_ssl=True,
         timeout=10,
+        remove_flag_after_processing=False,
+        archive_after_processing=None,
     ):
         (
             self.server,
@@ -45,6 +47,9 @@ class Checker:
         self.check_for = check_for
         self.action = action
         self.sender = sender
+        self.use_ssl = use_ssl
+        self.remove_flag_after_processing = remove_flag_after_processing
+        self.archive_after_processing = archive_after_processing
         self.connected = False
         self.last_activity = 0
         if use_ssl:
@@ -53,7 +58,10 @@ class Checker:
 
     def connect(self):
         self.server = imapclient.IMAPClient(
-            self.server_address, ssl_context=self.ssl_context, use_uid=False
+            self.server_address,
+            ssl=self.use_ssl,
+            ssl_context=self.ssl_context,
+            use_uid=False,
         )
         self.server.login(self.username, self.password)
         self.server.select_folder(self.mailbox)
@@ -158,7 +166,7 @@ class Checker:
         if not messages:
             return items
 
-        fetch_result = self.server.fetch(messages, ["ENVELOPE"])
+        fetch_result = self.server.fetch(messages, ["ENVELOPE", "UID"])
         for fetch_id, data in fetch_result.items():
             if b"ENVELOPE" not in data:
                 self.logger.warning(
@@ -190,13 +198,20 @@ class Checker:
                 from_ = ""
 
             items.append(
-                {"from_": from_, "subject": subject, "message_id": message_id}
+                {
+                    "from_": from_,
+                    "subject": subject,
+                    "message_id": message_id,
+                    "uid": data.get(b"UID"),
+                }
             )
             self.logger.info(f"Flagged item: {from_} / {subject}")
 
         return items
 
     def dispatch(self, items):
+        uids = [item["uid"] for item in items if item.get("uid") is not None]
+
         if self.action["action"] == "things":
             subject = items[0]["subject"]
             items.reverse()
@@ -222,9 +237,87 @@ class Checker:
             body = "Test resend"
             subject = items[0]["subject"]
 
+        on_success = None
+        if self.remove_flag_after_processing or self.archive_after_processing:
+            on_success = lambda: self.post_process(uids)
+
         SenderThread(
-            "Sender", self.logger, self.sender, self.action["email"], subject, body
+            "Sender",
+            self.logger,
+            self.sender,
+            self.action["email"],
+            subject,
+            body,
+            on_success=on_success,
         ).start()
+
+    def post_process(self, uids):
+        """Apply configured post-processing using a dedicated UID connection."""
+        if not uids or not (
+            self.remove_flag_after_processing or self.archive_after_processing
+        ):
+            return
+
+        cleanup_server = None
+        flag_removed = False
+        try:
+            cleanup_server = imapclient.IMAPClient(
+                self.server_address,
+                ssl=self.use_ssl,
+                ssl_context=self.ssl_context,
+                use_uid=True,
+            )
+            cleanup_server.login(self.username, self.password)
+            cleanup_server.select_folder(self.mailbox)
+
+            if self.archive_after_processing:
+                if not cleanup_server.has_capability("MOVE"):
+                    self.logger.error(
+                        f"{self.mailbox}: cannot archive processed messages because "
+                        "the server does not support MOVE"
+                    )
+                    return
+                if not cleanup_server.folder_exists(self.archive_after_processing):
+                    self.logger.error(
+                        f"{self.mailbox}: cannot archive processed messages because "
+                        f"folder {self.archive_after_processing!r} does not exist"
+                    )
+                    return
+
+            if self.remove_flag_after_processing:
+                cleanup_server.remove_flags(uids, [b"\\Flagged"])
+                flag_removed = True
+
+            if self.archive_after_processing:
+                cleanup_server.move(uids, self.archive_after_processing)
+
+            operations = []
+            if self.remove_flag_after_processing:
+                operations.append("removed flag")
+            if self.archive_after_processing:
+                operations.append(f"archived to {self.archive_after_processing!r}")
+            self.logger.info(
+                f"{self.mailbox}: post-processed messages {uids}: "
+                f"{', '.join(operations)}"
+            )
+        except Exception as exception:
+            partial = ""
+            if flag_removed and self.archive_after_processing:
+                partial = "; flags were removed before the archive operation failed"
+            self.logger.error(
+                f"{self.mailbox}: failed to post-process messages {uids}: "
+                f"{exception}{partial}",
+                exc_info=True,
+            )
+        finally:
+            if cleanup_server is not None:
+                try:
+                    cleanup_server.logout()
+                except Exception:
+                    try:
+                        cleanup_server.shutdown()
+                    except Exception:
+                        pass
 
     def idle_loop(self):
         """Main loop: maintain an IDLE connection and react to events."""
