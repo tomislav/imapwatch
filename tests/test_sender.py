@@ -1,8 +1,56 @@
 import logging
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
-from lib.imapwatch.sender import SenderThread
+from lib.imapwatch.sender import Sender, SenderThread
+
+
+class SenderTests(unittest.TestCase):
+    def test_sends_without_login_when_credentials_are_omitted(self):
+        smtp = Mock()
+        sender = Sender(
+            Mock(),
+            "smtp.example.test",
+            username=None,
+            password=None,
+            from_="imapwatch@example.test",
+        )
+
+        with patch("lib.imapwatch.sender.smtplib.SMTP", return_value=smtp) as client:
+            sender.send("to@example.test", "Subject", "Body")
+
+        client.assert_called_once_with("smtp.example.test", 587)
+        smtp.ehlo.assert_called_once()
+        smtp.starttls.assert_called_once()
+        smtp.login.assert_not_called()
+        smtp.sendmail.assert_called_once()
+        smtp.quit.assert_called_once()
+
+    def test_existing_credentials_are_used_for_login(self):
+        smtp = Mock()
+        sender = Sender(
+            Mock(),
+            "smtp.example.test",
+            username="user",
+            password="password",
+            from_="imapwatch@example.test",
+        )
+
+        with patch("lib.imapwatch.sender.smtplib.SMTP", return_value=smtp):
+            sender.send("to@example.test", "Subject", "Body")
+
+        smtp.login.assert_called_once_with("user", "password")
+        smtp.sendmail.assert_called_once()
+
+    def test_partial_credentials_fail_before_sending(self):
+        with self.assertRaisesRegex(ValueError, "both be set or both be omitted"):
+            Sender(
+                Mock(),
+                "smtp.example.test",
+                username="user",
+                password=None,
+                from_="imapwatch@example.test",
+            )
 
 
 class SenderThreadTests(unittest.TestCase):

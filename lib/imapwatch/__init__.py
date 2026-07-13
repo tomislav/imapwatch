@@ -153,8 +153,8 @@ class IMAPWatch:
                 sender = Sender(
                     self.logger,
                     self.config["smtp"]["server"],
-                    self.config["smtp"]["username"],
-                    self.config["smtp"]["password"],
+                    self.config["smtp"].get("username"),
+                    self.config["smtp"].get("password"),
                     self.config["smtp"]["from"],
                 )
 

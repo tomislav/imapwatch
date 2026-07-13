@@ -5,6 +5,10 @@ from email.mime.text import MIMEText
 
 class Sender:
     def __init__(self, logger, server, username, password, from_):
+        if bool(username) != bool(password):
+            raise ValueError(
+                "SMTP username and password must either both be set or both be omitted"
+            )
         self.logger = logger
         self.server = server
         self.username = username
@@ -23,7 +27,8 @@ class Sender:
         s = smtplib.SMTP(self.server, 587)
         s.ehlo()
         s.starttls()
-        s.login(self.username, self.password)
+        if self.username:
+            s.login(self.username, self.password)
         s.sendmail(self.from_, to, msg.as_string())
         s.quit()
 
