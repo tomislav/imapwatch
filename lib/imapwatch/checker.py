@@ -260,6 +260,10 @@ class Checker:
 
         cleanup_server = None
         flag_removed = False
+        archive_strategy = None
+        fallback_stage = None
+        copied = False
+        source_deleted = False
         try:
             cleanup_server = imapclient.IMAPClient(
                 self.server_address,
@@ -271,16 +275,20 @@ class Checker:
             cleanup_server.select_folder(self.mailbox)
 
             if self.archive_after_processing:
-                if not cleanup_server.has_capability("MOVE"):
-                    self.logger.error(
-                        f"{self.mailbox}: cannot archive processed messages because "
-                        "the server does not support MOVE"
-                    )
-                    return
                 if not cleanup_server.folder_exists(self.archive_after_processing):
                     self.logger.error(
                         f"{self.mailbox}: cannot archive processed messages because "
                         f"folder {self.archive_after_processing!r} does not exist"
+                    )
+                    return
+                if cleanup_server.has_capability("MOVE"):
+                    archive_strategy = "move"
+                elif cleanup_server.has_capability("UIDPLUS"):
+                    archive_strategy = "copy-delete"
+                else:
+                    self.logger.error(
+                        f"{self.mailbox}: cannot archive processed messages because "
+                        "the server supports neither MOVE nor UIDPLUS"
                     )
                     return
 
@@ -289,7 +297,20 @@ class Checker:
                 flag_removed = True
 
             if self.archive_after_processing:
-                cleanup_server.move(uids, self.archive_after_processing)
+                if archive_strategy == "move":
+                    fallback_stage = "MOVE"
+                    cleanup_server.move(uids, self.archive_after_processing)
+                else:
+                    fallback_stage = "COPY"
+                    cleanup_server.copy(uids, self.archive_after_processing)
+                    copied = True
+
+                    fallback_stage = "marking source messages deleted"
+                    cleanup_server.delete_messages(uids, silent=True)
+                    source_deleted = True
+
+                    fallback_stage = "UID EXPUNGE"
+                    cleanup_server.uid_expunge(uids)
 
             operations = []
             if self.remove_flag_after_processing:
@@ -301,11 +322,24 @@ class Checker:
                 f"{', '.join(operations)}"
             )
         except Exception as exception:
-            partial = ""
+            partial_states = []
             if flag_removed and self.archive_after_processing:
-                partial = "; flags were removed before the archive operation failed"
+                partial_states.append("flags were removed")
+            if copied:
+                partial_states.append("an archive copy exists")
+            if source_deleted:
+                partial_states.append("the source remains marked \\Deleted")
+            elif copied:
+                partial_states.append("the source remains in the watched mailbox")
+
+            stage = f" during {fallback_stage}" if fallback_stage else ""
+            partial = (
+                f"; partial state: {', '.join(partial_states)}"
+                if partial_states
+                else ""
+            )
             self.logger.error(
-                f"{self.mailbox}: failed to post-process messages {uids}: "
+                f"{self.mailbox}: failed to post-process messages {uids}{stage}: "
                 f"{exception}{partial}",
                 exc_info=True,
             )

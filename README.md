@@ -96,12 +96,15 @@ successfully:
 
 - `remove_flag_after_processing: true` removes the standard IMAP `\Flagged` flag.
 - `archive_after_processing: 'Archive'` moves the message to the named folder. The folder must
-  already exist, and the IMAP server must support the standard `MOVE` capability.
+  already exist. imapwatch uses `MOVE` when available; otherwise it safely falls back to
+  `COPY`, `\Deleted`, and UID-scoped expunge when the authenticated session supports `UIDPLUS`.
+  This enables the fallback for iCloud only when iCloud advertises `UIDPLUS` after login.
 
 Both options are disabled when omitted and can be enabled independently. If both are enabled,
-imapwatch removes the flag before moving the message. SMTP delivery remains asynchronous; failed
+imapwatch removes the flag before archiving the message. SMTP delivery remains asynchronous; failed
 SMTP delivery leaves the original message untouched. Post-processing failures are logged and are
-not retried automatically.
+not retried automatically. If a server supports neither `MOVE` nor `UIDPLUS`, archiving is skipped
+without changing the original message. imapwatch never uses mailbox-wide `EXPUNGE`.
 
 ## Want to help?
 

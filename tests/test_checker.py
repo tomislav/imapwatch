@@ -52,14 +52,22 @@ class CleanupClient:
         self,
         *,
         supports_move=True,
+        supports_uidplus=False,
         archive_exists=True,
         remove_error=None,
         move_error=None,
+        copy_error=None,
+        delete_error=None,
+        uid_expunge_error=None,
     ):
         self.supports_move = supports_move
+        self.supports_uidplus = supports_uidplus
         self.archive_exists = archive_exists
         self.remove_error = remove_error
         self.move_error = move_error
+        self.copy_error = copy_error
+        self.delete_error = delete_error
+        self.uid_expunge_error = uid_expunge_error
         self.calls = []
         self.logged_out = False
 
@@ -71,7 +79,11 @@ class CleanupClient:
 
     def has_capability(self, capability):
         self.calls.append(call.has_capability(capability))
-        return self.supports_move
+        if capability == "MOVE":
+            return self.supports_move
+        if capability == "UIDPLUS":
+            return self.supports_uidplus
+        return False
 
     def folder_exists(self, folder):
         self.calls.append(call.folder_exists(folder))
@@ -86,6 +98,21 @@ class CleanupClient:
         self.calls.append(call.move(uids, folder))
         if self.move_error:
             raise self.move_error
+
+    def copy(self, uids, folder):
+        self.calls.append(call.copy(uids, folder))
+        if self.copy_error:
+            raise self.copy_error
+
+    def delete_messages(self, uids, silent=False):
+        self.calls.append(call.delete_messages(uids, silent=silent))
+        if self.delete_error:
+            raise self.delete_error
+
+    def uid_expunge(self, uids):
+        self.calls.append(call.uid_expunge(uids))
+        if self.uid_expunge_error:
+            raise self.uid_expunge_error
 
     def logout(self):
         self.logged_out = True
@@ -181,8 +208,8 @@ class CheckerPostProcessingTests(unittest.TestCase):
             [
                 call.login("user", "password"),
                 call.select_folder("INBOX"),
-                call.has_capability("MOVE"),
                 call.folder_exists("Archive"),
+                call.has_capability("MOVE"),
                 call.move([201], "Archive"),
             ],
         )
@@ -201,11 +228,63 @@ class CheckerPostProcessingTests(unittest.TestCase):
             checker.post_process([301, 302])
 
         self.assertLess(
+            cleanup.calls.index(call.folder_exists("Archive")),
+            cleanup.calls.index(call.remove_flags([301, 302], [b"\\Flagged"])),
+        )
+        self.assertLess(
+            cleanup.calls.index(call.has_capability("MOVE")),
+            cleanup.calls.index(call.remove_flags([301, 302], [b"\\Flagged"])),
+        )
+        self.assertLess(
             cleanup.calls.index(call.remove_flags([301, 302], [b"\\Flagged"])),
             cleanup.calls.index(call.move([301, 302], "Archive")),
         )
 
-    def test_unsupported_move_leaves_flags_untouched(self):
+    def test_uidplus_fallback_copies_deletes_and_expunge_target_uids(self):
+        checker = make_checker(archive_after_processing="Archive")
+        cleanup = CleanupClient(supports_move=False, supports_uidplus=True)
+
+        with patch(
+            "lib.imapwatch.checker.imapclient.IMAPClient", return_value=cleanup
+        ):
+            checker.post_process([401, 402])
+
+        self.assertEqual(
+            cleanup.calls,
+            [
+                call.login("user", "password"),
+                call.select_folder("INBOX"),
+                call.folder_exists("Archive"),
+                call.has_capability("MOVE"),
+                call.has_capability("UIDPLUS"),
+                call.copy([401, 402], "Archive"),
+                call.delete_messages([401, 402], silent=True),
+                call.uid_expunge([401, 402]),
+            ],
+        )
+
+    def test_uidplus_fallback_removes_flag_after_preflight_before_copy(self):
+        checker = make_checker(
+            remove_flag_after_processing=True,
+            archive_after_processing="Archive",
+        )
+        cleanup = CleanupClient(supports_move=False, supports_uidplus=True)
+
+        with patch(
+            "lib.imapwatch.checker.imapclient.IMAPClient", return_value=cleanup
+        ):
+            checker.post_process([403])
+
+        self.assertLess(
+            cleanup.calls.index(call.has_capability("UIDPLUS")),
+            cleanup.calls.index(call.remove_flags([403], [b"\\Flagged"])),
+        )
+        self.assertLess(
+            cleanup.calls.index(call.remove_flags([403], [b"\\Flagged"])),
+            cleanup.calls.index(call.copy([403], "Archive")),
+        )
+
+    def test_unsupported_move_and_uidplus_leaves_flags_untouched(self):
         checker = make_checker(
             remove_flag_after_processing=True,
             archive_after_processing="Archive",
@@ -219,6 +298,9 @@ class CheckerPostProcessingTests(unittest.TestCase):
 
         self.assertNotIn(call.remove_flags([401], [b"\\Flagged"]), cleanup.calls)
         self.assertNotIn(call.move([401], "Archive"), cleanup.calls)
+        self.assertNotIn(call.copy([401], "Archive"), cleanup.calls)
+        self.assertNotIn(call.delete_messages([401], silent=True), cleanup.calls)
+        self.assertNotIn(call.uid_expunge([401]), cleanup.calls)
         self.assertTrue(cleanup.logged_out)
 
     def test_missing_archive_leaves_flags_untouched(self):
@@ -235,6 +317,7 @@ class CheckerPostProcessingTests(unittest.TestCase):
 
         self.assertNotIn(call.remove_flags([501], [b"\\Flagged"]), cleanup.calls)
         self.assertNotIn(call.move([501], "Missing"), cleanup.calls)
+        self.assertNotIn(call.copy([501], "Missing"), cleanup.calls)
         self.assertTrue(cleanup.logged_out)
 
     def test_connection_failure_is_logged_without_raising(self):
@@ -264,6 +347,69 @@ class CheckerPostProcessingTests(unittest.TestCase):
 
         log_message = checker.logger.error.call_args.args[0]
         self.assertIn("flags were removed", log_message)
+        self.assertTrue(cleanup.logged_out)
+
+    def test_fallback_copy_failure_logs_unflagged_source(self):
+        checker = make_checker(
+            remove_flag_after_processing=True,
+            archive_after_processing="Archive",
+        )
+        cleanup = CleanupClient(
+            supports_move=False,
+            supports_uidplus=True,
+            copy_error=imapclient.exceptions.IMAPClientError("copy failed"),
+        )
+
+        with patch(
+            "lib.imapwatch.checker.imapclient.IMAPClient", return_value=cleanup
+        ):
+            checker.post_process([801])
+
+        log_message = checker.logger.error.call_args.args[0]
+        self.assertIn("during COPY", log_message)
+        self.assertIn("flags were removed", log_message)
+        self.assertNotIn("archive copy exists", log_message)
+        self.assertTrue(cleanup.logged_out)
+
+    def test_fallback_delete_failure_logs_duplicate_state(self):
+        checker = make_checker(archive_after_processing="Archive")
+        cleanup = CleanupClient(
+            supports_move=False,
+            supports_uidplus=True,
+            delete_error=imapclient.exceptions.IMAPClientError("delete failed"),
+        )
+
+        with patch(
+            "lib.imapwatch.checker.imapclient.IMAPClient", return_value=cleanup
+        ):
+            checker.post_process([802])
+
+        log_message = checker.logger.error.call_args.args[0]
+        self.assertIn("during marking source messages deleted", log_message)
+        self.assertIn("an archive copy exists", log_message)
+        self.assertIn("source remains in the watched mailbox", log_message)
+        self.assertNotIn(call.uid_expunge([802]), cleanup.calls)
+        self.assertTrue(cleanup.logged_out)
+
+    def test_fallback_uid_expunge_failure_logs_deleted_source(self):
+        checker = make_checker(archive_after_processing="Archive")
+        cleanup = CleanupClient(
+            supports_move=False,
+            supports_uidplus=True,
+            uid_expunge_error=imapclient.exceptions.IMAPClientError(
+                "uid expunge failed"
+            ),
+        )
+
+        with patch(
+            "lib.imapwatch.checker.imapclient.IMAPClient", return_value=cleanup
+        ):
+            checker.post_process([803])
+
+        log_message = checker.logger.error.call_args.args[0]
+        self.assertIn("during UID EXPUNGE", log_message)
+        self.assertIn("an archive copy exists", log_message)
+        self.assertIn("source remains marked \\Deleted", log_message)
         self.assertTrue(cleanup.logged_out)
 
 
