@@ -102,7 +102,9 @@ timeout, 8,000 body characters per email, and 24,000 body characters across the 
 budget is divided evenly so every email contributes context. Inline plain text is preferred;
 HTML-only messages are converted to readable text, and attachments are excluded. The request is
 made with response storage disabled. Titles target 4–10 words, front-load specific names and
-topics, and never include emojis or decorative prefixes.
+topics, and never include emojis or decorative prefixes. The title language is selected from the
+subject and substantive message body; signatures, URLs, headers, and isolated foreign-language
+boilerplate do not influence that choice.
 
 Only opted-in Things and OmniFocus actions fetch message bodies or call OpenAI. If the API key is
 missing, the request fails, or the response is not a valid single-line title of at most 120
