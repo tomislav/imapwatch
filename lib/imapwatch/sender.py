@@ -7,16 +7,29 @@ from .logging_utils import log_event
 
 
 class Sender:
-    def __init__(self, logger, server, username, password, from_):
+    def __init__(
+        self,
+        logger,
+        server,
+        username,
+        password,
+        from_,
+        security="starttls",
+        port=587,
+    ):
         if bool(username) != bool(password):
             raise ValueError(
                 "SMTP username and password must either both be set or both be omitted"
             )
+        if security not in ("starttls", "none"):
+            raise ValueError("SMTP security must be either 'starttls' or 'none'")
         self.logger = logger
         self.server = server
         self.username = username
         self.password = password
         self.from_ = from_
+        self.security = security
+        self.port = port
         threading.Thread.__init__(self)
 
     def send(self, to, subject, message):
@@ -26,9 +39,10 @@ class Sender:
         msg["To"] = to
         msg["Subject"] = subject
 
-        s = smtplib.SMTP(self.server, 587)
+        s = smtplib.SMTP(self.server, self.port)
         s.ehlo()
-        s.starttls()
+        if self.security == "starttls":
+            s.starttls()
         if self.username:
             s.login(self.username, self.password)
         s.sendmail(self.from_, to, msg.as_string())

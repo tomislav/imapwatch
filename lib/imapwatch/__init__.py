@@ -253,6 +253,8 @@ class IMAPWatch:
                     self.config["smtp"].get("username"),
                     self.config["smtp"].get("password"),
                     self.config["smtp"]["from"],
+                    security=self.config["smtp"].get("security", "starttls"),
+                    port=self.config["smtp"].get("port", 587),
                 )
                 title_generator = self.create_title_generator()
 

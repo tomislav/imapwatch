@@ -81,6 +81,8 @@ openai:
 
 smtp:
   server: 'smtp.provider.com'
+  port: 587
+  security: 'starttls'
   username: 'john@provider.com'
   password: 'mysecretpass'
   from: 'john@provider.com'
@@ -139,12 +141,16 @@ authentication. Omit both fields to send without calling SMTP `LOGIN`:
 
 ```yaml
 smtp:
-  server: 'hades.cerberus.group'
+  server: 'smtp'
+  port: 587
+  security: 'none'
   from: 'imapwatch@cerberus.group'
 ```
 
-SMTP connections continue to use port 587 with STARTTLS. If authentication is needed, both
-`username` and `password` must be provided.
+The SMTP port defaults to `587`, and `smtp.security` defaults to `starttls` for backward
+compatibility. Set `security: 'none'` only for a trusted plaintext relay, such as a Postfix
+container reachable exclusively over a private Docker network. If authentication is needed,
+both `username` and `password` must be provided.
 
 Each watched mailbox can optionally change a message after its configured action has been sent
 successfully:

@@ -36,6 +36,8 @@ openai:
 
 smtp:
   server: 'smtp.provider.com'
+  port: 587
+  security: 'starttls'
   username: 'john@provider.com'
   password: 'mysecretpass'
   from: 'john@provider.com'

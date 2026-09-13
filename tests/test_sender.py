@@ -42,6 +42,37 @@ class SenderTests(unittest.TestCase):
         smtp.login.assert_called_once_with("user", "password")
         smtp.sendmail.assert_called_once()
 
+    def test_plaintext_security_sends_without_starttls(self):
+        smtp = Mock()
+        sender = Sender(
+            Mock(),
+            "smtp.example.test",
+            username=None,
+            password=None,
+            from_="imapwatch@example.test",
+            security="none",
+            port=2525,
+        )
+
+        with patch("lib.imapwatch.sender.smtplib.SMTP", return_value=smtp) as client:
+            sender.send("to@example.test", "Subject", "Body")
+
+        client.assert_called_once_with("smtp.example.test", 2525)
+        smtp.starttls.assert_not_called()
+        smtp.sendmail.assert_called_once()
+        smtp.quit.assert_called_once()
+
+    def test_unknown_security_mode_fails_before_sending(self):
+        with self.assertRaisesRegex(ValueError, "SMTP security"):
+            Sender(
+                Mock(),
+                "smtp.example.test",
+                username=None,
+                password=None,
+                from_="imapwatch@example.test",
+                security="opportunistic",
+            )
+
     def test_partial_credentials_fail_before_sending(self):
         with self.assertRaisesRegex(ValueError, "both be set or both be omitted"):
             Sender(
