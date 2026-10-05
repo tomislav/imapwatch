@@ -23,7 +23,7 @@ from .sender import Sender
 from .checker import Checker, CheckerThread
 from .logging_utils import log_event
 from .loggingdaemoncontext import LoggingDaemonContext
-from .title_generator import OpenAITitleGenerator
+from .title_generator import OpenAITitleGenerator, OpenRouterTitleGenerator
 
 
 class IMAPWatch:
@@ -145,54 +145,86 @@ class IMAPWatch:
             account=account_label or account.get("account") or "account-1",
         )
 
-    @staticmethod
-    def action_uses_openai_title(action):
-        return (
-            action.get("action") in {"things", "omnifocus"}
-            and action.get("title_generator") == "openai"
-        )
+    TITLE_PROVIDERS = {
+        "openai": {
+            "api_key_env": "OPENAI_API_KEY",
+            "default_model": "gpt-5.6-terra",
+        },
+        "openrouter": {
+            "api_key_env": "OPENROUTER_API_KEY",
+            "default_model": "openai/gpt-5.6-terra",
+        },
+    }
+
+    @classmethod
+    def action_title_provider(cls, action):
+        provider = action.get("title_generator")
+        if action.get("action") in {"things", "omnifocus"} and (
+            provider in cls.TITLE_PROVIDERS
+        ):
+            return provider
+        return None
 
     @staticmethod
     def account_label(account, index):
         return account.get("account") or f"account-{index + 1}"
 
-    def create_title_generator(self):
-        if not any(
-            self.action_uses_openai_title(action)
+    def create_title_generators(self):
+        providers = {
+            self.action_title_provider(action)
             for action in self.config.get("actions", [])
-        ):
-            return None
+        }
+        providers.discard(None)
+        title_generators = {}
+        for provider in sorted(providers):
+            title_generator = self.create_title_generator(provider)
+            if title_generator is not None:
+                title_generators[provider] = title_generator
+        return title_generators
 
-        api_key = os.environ.get("OPENAI_API_KEY")
+    def create_title_generator(self, provider):
+        settings = self.TITLE_PROVIDERS[provider]
+        api_key = os.environ.get(settings["api_key_env"])
         if not api_key:
             log_event(
                 self.logger,
                 "error",
-                "openai_title_disabled",
+                f"{provider}_title_disabled",
                 reason="missing_api_key",
                 fallback="original_subject",
             )
             return None
 
-        config = self.config.get("openai", {})
-        model = config.get("model", "gpt-5.6-terra")
+        config = self.config.get(provider, {})
+        model = config.get("model", settings["default_model"])
         timeout_seconds = config.get("timeout_seconds", 10)
         max_body_chars_per_email = config.get("max_body_chars_per_email", 8000)
         max_batch_chars = config.get("max_batch_chars", 24000)
+        options = {}
+        if provider == "openrouter":
+            options["fallback_models"] = config.get("fallback_models", [])
+            options["reasoning_effort"] = config.get("reasoning_effort")
+        generator_class = (
+            OpenRouterTitleGenerator
+            if provider == "openrouter"
+            else OpenAITitleGenerator
+        )
         try:
-            title_generator = OpenAITitleGenerator(
+            title_generator = generator_class(
                 self.logger,
                 api_key,
                 model=model,
                 timeout_seconds=timeout_seconds,
                 max_body_chars_per_email=max_body_chars_per_email,
                 max_batch_chars=max_batch_chars,
+                **options,
             )
             log_event(
                 self.logger,
                 "info",
-                "openai_title_enabled",
+                f"{provider}_title_enabled",
                 model=model,
+                **options,
                 timeout_seconds=timeout_seconds,
                 max_body_chars_per_email=max_body_chars_per_email,
                 max_batch_chars=max_batch_chars,
@@ -202,7 +234,7 @@ class IMAPWatch:
             log_event(
                 self.logger,
                 "error",
-                "openai_title_disabled",
+                f"{provider}_title_disabled",
                 reason="initialization_failed",
                 error_type=type(exception).__name__,
                 fallback="original_subject",
@@ -256,7 +288,7 @@ class IMAPWatch:
                     security=self.config["smtp"].get("security", "starttls"),
                     port=self.config["smtp"].get("port", 587),
                 )
-                title_generator = self.create_title_generator()
+                title_generators = self.create_title_generators()
 
                 for account_index, account in enumerate(accounts):
                     account_label = self.account_label(account, account_index)
@@ -272,10 +304,8 @@ class IMAPWatch:
                             mailbox,
                             action,
                             sender,
-                            title_generator=(
-                                title_generator
-                                if self.action_uses_openai_title(action)
-                                else None
+                            title_generator=title_generators.get(
+                                self.action_title_provider(action)
                             ),
                             account_label=account_label,
                         )

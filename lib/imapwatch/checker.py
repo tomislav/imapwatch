@@ -402,14 +402,14 @@ class Checker:
                 except Exception as exception:
                     self.log(
                         "warning",
-                        "openai_title_failed",
+                        f"{self.title_generator.provider}_title_failed",
                         error_type=type(exception).__name__,
                         fallback="original_subject",
                     )
                     generated_title = None
                 if generated_title:
                     subject = generated_title
-                    title_source = "openai"
+                    title_source = self.title_generator.provider
 
         # TODO: create this action
         elif self.action["action"] == "resend":

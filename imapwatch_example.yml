@@ -34,6 +34,12 @@ openai:
   max_body_chars_per_email: 8000
   max_batch_chars: 24000
 
+# Only needed for actions using title_generator: 'openrouter'
+openrouter:
+  model: 'anthropic/claude-haiku-4.5'
+  fallback_models: ['google/gemini-3-flash']
+  timeout_seconds: 10
+
 smtp:
   server: 'smtp.provider.com'
   port: 587

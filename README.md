@@ -79,6 +79,12 @@ openai:
   max_body_chars_per_email: 8000
   max_batch_chars: 24000
 
+# Only needed for actions using title_generator: 'openrouter'
+openrouter:
+  model: 'anthropic/claude-haiku-4.5'
+  fallback_models: ['google/gemini-3-flash']
+  timeout_seconds: 10
+
 smtp:
   server: 'smtp.provider.com'
   port: 587
@@ -108,7 +114,24 @@ topics, and never include emojis or decorative prefixes. The title language is s
 subject and substantive message body; signatures, URLs, headers, and isolated foreign-language
 boilerplate do not influence that choice.
 
-Only opted-in Things and OmniFocus actions fetch message bodies or call OpenAI. If the API key is
+#### OpenRouter
+
+To use other models (Claude, Gemini, Llama, …) through [OpenRouter](https://openrouter.ai), set
+`title_generator: 'openrouter'` on the action and export `OPENROUTER_API_KEY`. The optional
+top-level `openrouter` settings accept the same timeout and context limits as `openai`, plus:
+
+- `model`: any OpenRouter model slug (default `openai/gpt-5.6-terra`). The model must support
+  structured outputs.
+- `fallback_models`: models OpenRouter tries in order if the primary model fails.
+- `reasoning_effort`: optional reasoning effort (for example `low`) for reasoning models. Leave it
+  unset for models that don't support reasoning.
+
+OpenRouter requests use Chat Completions with a JSON schema and are routed only to providers that
+support every request parameter and don't collect prompt data (`data_collection: deny`). Its log
+events use the `openrouter_title_*` prefix. Actions can mix providers; each one is initialized
+once and disabled independently if its API key is missing.
+
+Only opted-in Things and OmniFocus actions fetch message bodies or call a model provider. If the API key is
 missing, the request fails, or the response is not a valid single-line title of at most 120
 characters, imapwatch logs the failure without email content and creates the task with the original
 first email subject. The existing combined task notes and message links are unchanged.

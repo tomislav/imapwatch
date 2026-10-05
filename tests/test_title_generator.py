@@ -3,7 +3,11 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 
-from lib.imapwatch.title_generator import GeneratedTitle, OpenAITitleGenerator
+from lib.imapwatch.title_generator import (
+    GeneratedTitle,
+    OpenAITitleGenerator,
+    OpenRouterTitleGenerator,
+)
 
 
 def make_items():
@@ -221,6 +225,141 @@ class OpenAITitleGeneratorTests(unittest.TestCase):
             with self.subTest(option=option):
                 with self.assertRaises(ValueError):
                     self.make_generator(**option)
+
+
+def make_completion(title=None, parsed=None):
+    if parsed is None and title is not None:
+        parsed = GeneratedTitle(title=title)
+    return SimpleNamespace(
+        id="gen_test",
+        choices=[SimpleNamespace(message=SimpleNamespace(parsed=parsed))],
+        usage=SimpleNamespace(prompt_tokens=42, completion_tokens=7),
+    )
+
+
+class OpenRouterTitleGeneratorTests(unittest.TestCase):
+    def make_generator(self, **options):
+        self.logger = Mock()
+        self.client = Mock()
+        defaults = {
+            "logger": self.logger,
+            "api_key": "secret",
+            "client": self.client,
+        }
+        defaults.update(options)
+        return OpenRouterTitleGenerator(**defaults)
+
+    def test_client_points_at_openrouter_without_retries(self):
+        with patch("lib.imapwatch.title_generator.OpenAI") as client_class:
+            generator = OpenRouterTitleGenerator(Mock(), "secret", timeout_seconds=4)
+
+        client_class.assert_called_once_with(
+            api_key="secret",
+            base_url="https://openrouter.ai/api/v1",
+            timeout=4.0,
+            max_retries=0,
+        )
+        self.assertEqual(generator.model, "openai/gpt-5.6-terra")
+
+    def test_success_uses_chat_completions_with_structured_output(self):
+        generator = self.make_generator(model="anthropic/claude-haiku-4.5")
+        self.client.chat.completions.parse.return_value = make_completion(
+            "Review both proposals"
+        )
+
+        with patch(
+            "lib.imapwatch.title_generator.time.monotonic",
+            side_effect=[10.0, 10.123],
+        ):
+            title = generator.generate(
+                make_items(),
+                account="provider",
+                mailbox="INBOX",
+                action="things",
+            )
+
+        self.assertEqual(title, "Review both proposals")
+        request = self.client.chat.completions.parse.call_args.kwargs
+        self.assertEqual(request["model"], "anthropic/claude-haiku-4.5")
+        self.assertIs(request["response_format"], GeneratedTitle)
+        self.assertEqual(request["messages"][0]["role"], "system")
+        self.assertIn("untrusted data", request["messages"][0]["content"])
+        self.assertEqual(request["messages"][1]["role"], "user")
+        payload = json.loads(request["messages"][1]["content"])
+        self.assertEqual(len(payload["emails"]), 2)
+        self.assertEqual(
+            request["extra_body"],
+            {"provider": {"require_parameters": True, "data_collection": "deny"}},
+        )
+        self.logger.info.assert_called_once_with(
+            "event=openrouter_title_succeeded account=provider mailbox=INBOX "
+            "action=things model=anthropic/claude-haiku-4.5 count=2 "
+            "duration_ms=123 response_id=gen_test input_tokens=42 "
+            "output_tokens=7"
+        )
+        self.assertNotIn(
+            "Review both proposals", self.logger.info.call_args.args[0]
+        )
+
+    def test_fallback_models_and_reasoning_are_sent(self):
+        generator = self.make_generator(
+            model="anthropic/claude-haiku-4.5",
+            fallback_models=["google/gemini-3-flash"],
+            reasoning_effort="low",
+        )
+        self.client.chat.completions.parse.return_value = make_completion(
+            "Review both proposals"
+        )
+
+        generator.generate(make_items())
+
+        extra_body = self.client.chat.completions.parse.call_args.kwargs[
+            "extra_body"
+        ]
+        self.assertEqual(
+            extra_body["models"],
+            ["anthropic/claude-haiku-4.5", "google/gemini-3-flash"],
+        )
+        self.assertEqual(extra_body["reasoning"], {"effort": "low"})
+
+    def test_api_failure_returns_none_without_logging_email_content(self):
+        generator = self.make_generator()
+        self.client.chat.completions.parse.side_effect = RuntimeError("down")
+
+        title = generator.generate(
+            [{"subject": "Private subject", "body": "Private body"}]
+        )
+
+        self.assertIsNone(title)
+        warning = self.logger.warning.call_args.args[0]
+        self.assertIn("event=openrouter_title_failed", warning)
+        self.assertIn("error_type=RuntimeError", warning)
+        self.assertNotIn("Private subject", warning)
+        self.assertNotIn("Private body", warning)
+        self.assertNotIn("secret", warning)
+
+    def test_missing_or_invalid_output_returns_none(self):
+        for response in [
+            SimpleNamespace(choices=[]),
+            make_completion(parsed=None),
+            make_completion("First line\nSecond line"),
+            make_completion("💬 Read the message"),
+        ]:
+            with self.subTest(response=response):
+                generator = self.make_generator()
+                self.client.chat.completions.parse.return_value = response
+
+                self.assertIsNone(generator.generate(make_items()))
+                self.assertIn(
+                    "event=openrouter_title_failed",
+                    self.logger.warning.call_args.args[0],
+                )
+
+    def test_invalid_fallback_models_fail_initialization(self):
+        for fallback_models in ["google/gemini-3-flash", [""], [None]]:
+            with self.subTest(fallback_models=fallback_models):
+                with self.assertRaises(ValueError):
+                    self.make_generator(fallback_models=fallback_models)
 
 
 if __name__ == "__main__":

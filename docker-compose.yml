@@ -10,5 +10,6 @@ services:
       retries: 3
     environment:
       - OPENAI_API_KEY
+      - OPENROUTER_API_KEY
     volumes:
       - ./imapwatch.yml:/app/imapwatch.yml:ro

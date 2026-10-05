@@ -286,7 +286,7 @@ class CheckerPostProcessingTests(unittest.TestCase):
         checker.post_process.assert_called_once_with([11, 12])
 
     def test_dispatch_uses_generated_title_and_preserves_combined_notes(self):
-        generator = Mock()
+        generator = Mock(provider="openai")
         generator.generate.return_value = "Review both proposals"
         checker = make_checker(title_generator=generator)
         items = [
@@ -333,7 +333,7 @@ class CheckerPostProcessingTests(unittest.TestCase):
         self.assertIn("things@example.test", debug_message)
 
     def test_dispatch_falls_back_to_subject_if_generator_raises(self):
-        generator = Mock()
+        generator = Mock(provider="openrouter")
         generator.generate.side_effect = RuntimeError("unavailable")
         checker = make_checker(title_generator=generator)
         items = [
@@ -351,6 +351,10 @@ class CheckerPostProcessingTests(unittest.TestCase):
 
         self.assertEqual(sender_thread.call_args.args[4], "Original subject")
         checker.logger.warning.assert_called_once()
+        self.assertIn(
+            "event=openrouter_title_failed",
+            checker.logger.warning.call_args.args[0],
+        )
 
     def test_remove_flag_only(self):
         checker = make_checker(remove_flag_after_processing=True)
@@ -667,9 +671,9 @@ class CheckerConfigurationTests(unittest.TestCase):
         }
 
         with patch.dict("lib.imapwatch.os.environ", {}, clear=True):
-            title_generator = self.watch.create_title_generator()
+            title_generators = self.watch.create_title_generators()
 
-        self.assertIsNone(title_generator)
+        self.assertEqual(title_generators, {})
         self.watch.logger.error.assert_called_once()
 
     def test_openai_config_initializes_shared_generator(self):
@@ -692,9 +696,9 @@ class CheckerConfigurationTests(unittest.TestCase):
         with patch.dict(
             "lib.imapwatch.os.environ", {"OPENAI_API_KEY": "secret"}, clear=True
         ), patch("lib.imapwatch.OpenAITitleGenerator") as generator_class:
-            title_generator = self.watch.create_title_generator()
+            title_generators = self.watch.create_title_generators()
 
-        self.assertIs(title_generator, generator_class.return_value)
+        self.assertEqual(title_generators, {"openai": generator_class.return_value})
         generator_class.assert_called_once_with(
             self.watch.logger,
             "secret",
@@ -719,10 +723,93 @@ class CheckerConfigurationTests(unittest.TestCase):
             ]
         }
 
-        title_generator = self.watch.create_title_generator()
+        title_generators = self.watch.create_title_generators()
 
-        self.assertIsNone(title_generator)
+        self.assertEqual(title_generators, {})
         self.watch.logger.error.assert_not_called()
+
+    def test_openrouter_config_initializes_generator(self):
+        self.watch.config = {
+            "actions": [
+                {
+                    "action": "things",
+                    "email": "things@example.test",
+                    "title_generator": "openrouter",
+                }
+            ],
+            "openrouter": {
+                "model": "anthropic/claude-haiku-4.5",
+                "fallback_models": ["google/gemini-3-flash"],
+                "reasoning_effort": "low",
+            },
+        }
+
+        with patch.dict(
+            "lib.imapwatch.os.environ",
+            {"OPENROUTER_API_KEY": "router-secret", "OPENAI_API_KEY": "secret"},
+            clear=True,
+        ), patch(
+            "lib.imapwatch.OpenRouterTitleGenerator"
+        ) as generator_class, patch(
+            "lib.imapwatch.OpenAITitleGenerator"
+        ) as openai_class:
+            title_generators = self.watch.create_title_generators()
+
+        self.assertEqual(
+            title_generators, {"openrouter": generator_class.return_value}
+        )
+        openai_class.assert_not_called()
+        generator_class.assert_called_once_with(
+            self.watch.logger,
+            "router-secret",
+            model="anthropic/claude-haiku-4.5",
+            timeout_seconds=10,
+            max_body_chars_per_email=8000,
+            max_batch_chars=24000,
+            fallback_models=["google/gemini-3-flash"],
+            reasoning_effort="low",
+        )
+        self.watch.logger.info.assert_called_once_with(
+            "event=openrouter_title_enabled model=anthropic/claude-haiku-4.5 "
+            'fallback_models=["google/gemini-3-flash"] reasoning_effort=low '
+            "timeout_seconds=10 max_body_chars_per_email=8000 "
+            "max_batch_chars=24000"
+        )
+
+    def test_mixed_providers_initialize_one_generator_each(self):
+        self.watch.config = {
+            "actions": [
+                {"action": "things", "title_generator": "openrouter"},
+                {"action": "omnifocus", "title_generator": "openai"},
+            ]
+        }
+
+        with patch.dict(
+            "lib.imapwatch.os.environ",
+            {"OPENROUTER_API_KEY": "router-secret"},
+            clear=True,
+        ), patch(
+            "lib.imapwatch.OpenRouterTitleGenerator"
+        ) as openrouter_class, patch(
+            "lib.imapwatch.OpenAITitleGenerator"
+        ) as openai_class:
+            title_generators = self.watch.create_title_generators()
+
+        self.assertEqual(
+            title_generators, {"openrouter": openrouter_class.return_value}
+        )
+        openai_class.assert_not_called()
+        self.watch.logger.error.assert_called_once_with(
+            "event=openai_title_disabled reason=missing_api_key "
+            "fallback=original_subject"
+        )
+
+    def test_unknown_title_generator_is_ignored(self):
+        self.assertIsNone(
+            self.watch.action_title_provider(
+                {"action": "things", "title_generator": "gemini"}
+            )
+        )
 
 
 class CheckerReconnectTests(unittest.TestCase):
