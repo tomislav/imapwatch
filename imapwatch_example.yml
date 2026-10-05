@@ -36,8 +36,9 @@ openai:
 
 # Only needed for actions using title_generator: 'openrouter'
 openrouter:
-  model: 'anthropic/claude-haiku-4.5'
-  fallback_models: ['google/gemini-3-flash']
+  model: 'google/gemini-3.8-flash'
+  fallback_models: ['anthropic/claude-haiku-4.5']
+  reasoning_effort: 'low'
   timeout_seconds: 10
 
 smtp:

@@ -739,7 +739,7 @@ class CheckerConfigurationTests(unittest.TestCase):
             ],
             "openrouter": {
                 "model": "anthropic/claude-haiku-4.5",
-                "fallback_models": ["google/gemini-3-flash"],
+                "fallback_models": ["google/gemini-3.8-flash"],
                 "reasoning_effort": "low",
             },
         }
@@ -766,12 +766,12 @@ class CheckerConfigurationTests(unittest.TestCase):
             timeout_seconds=10,
             max_body_chars_per_email=8000,
             max_batch_chars=24000,
-            fallback_models=["google/gemini-3-flash"],
+            fallback_models=["google/gemini-3.8-flash"],
             reasoning_effort="low",
         )
         self.watch.logger.info.assert_called_once_with(
             "event=openrouter_title_enabled model=anthropic/claude-haiku-4.5 "
-            'fallback_models=["google/gemini-3-flash"] reasoning_effort=low '
+            'fallback_models=["google/gemini-3.8-flash"] reasoning_effort=low '
             "timeout_seconds=10 max_body_chars_per_email=8000 "
             "max_batch_chars=24000"
         )

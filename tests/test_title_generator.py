@@ -304,7 +304,7 @@ class OpenRouterTitleGeneratorTests(unittest.TestCase):
     def test_fallback_models_and_reasoning_are_sent(self):
         generator = self.make_generator(
             model="anthropic/claude-haiku-4.5",
-            fallback_models=["google/gemini-3-flash"],
+            fallback_models=["google/gemini-3.8-flash"],
             reasoning_effort="low",
         )
         self.client.chat.completions.parse.return_value = make_completion(
@@ -318,7 +318,7 @@ class OpenRouterTitleGeneratorTests(unittest.TestCase):
         ]
         self.assertEqual(
             extra_body["models"],
-            ["anthropic/claude-haiku-4.5", "google/gemini-3-flash"],
+            ["anthropic/claude-haiku-4.5", "google/gemini-3.8-flash"],
         )
         self.assertEqual(extra_body["reasoning"], {"effort": "low"})
 
@@ -356,7 +356,7 @@ class OpenRouterTitleGeneratorTests(unittest.TestCase):
                 )
 
     def test_invalid_fallback_models_fail_initialization(self):
-        for fallback_models in ["google/gemini-3-flash", [""], [None]]:
+        for fallback_models in ["google/gemini-3.8-flash", [""], [None]]:
             with self.subTest(fallback_models=fallback_models):
                 with self.assertRaises(ValueError):
                     self.make_generator(fallback_models=fallback_models)
